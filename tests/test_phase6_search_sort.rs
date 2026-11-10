@@ -95,3 +95,27 @@ fn test_column_sorting() {
     let top = backend.row_uid(tabular_core::backend::VisualRowIdx(0)).unwrap();
     assert_eq!(backend.inner.get((top, ColumnUid(1)).into()).unwrap().to_string(), "95");
 }
+
+#[test]
+fn test_arbitrary_sql_query_execution_and_viewing() {
+    let mut db = sqlite_editor::db::DbService::new();
+    let temp_dir = std::env::temp_dir();
+    let db_path = temp_dir.join("test_query_view.db");
+    let _ = std::fs::remove_file(&db_path);
+
+    sqlite_editor::db::create_sample_database(&db_path).unwrap();
+    db.open(&db_path).unwrap();
+
+    // Run JOIN query
+    let query = "SELECT c.name, COUNT(o.order_id) as order_cnt FROM customers c LEFT JOIN orders o ON c.id = o.customer_id GROUP BY c.id ORDER BY order_cnt DESC;";
+    let (col_names, rows) = db.execute_query(query, Some(100)).unwrap();
+
+    assert_eq!(col_names, vec!["name", "order_cnt"]);
+    assert_eq!(rows.len(), 5);
+
+    let table = TrackedTableBackend::from_query_result(col_names, rows);
+    assert_eq!(table.row_count(), 5);
+    assert_eq!(table.column_names.len(), 2);
+
+    let _ = std::fs::remove_file(&db_path);
+}

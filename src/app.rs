@@ -11,6 +11,32 @@ use std::time::Instant;
 use tabular_core::backend::VisualRowIdx;
 use tabular_core::{CellCoord, ColumnUid};
 
+pub struct QueryWindowState {
+    pub is_open: bool,
+    pub sql_text: String,
+    pub result_table: Option<TrackedTableBackend>,
+    pub result_view: TableView,
+    pub result_config: TableViewConfig,
+    pub status_message: Option<String>,
+    pub is_error: bool,
+    pub execution_dur: Option<std::time::Duration>,
+}
+
+impl Default for QueryWindowState {
+    fn default() -> Self {
+        Self {
+            is_open: false,
+            sql_text: "SELECT * FROM customers LIMIT 50;".to_string(),
+            result_table: None,
+            result_view: TableView::new(),
+            result_config: TableViewConfig::default(),
+            status_message: None,
+            is_error: false,
+            execution_dur: None,
+        }
+    }
+}
+
 pub struct SqliteEditorApp {
     pub db_service: DbService,
     pub table_summaries: Vec<TableSummary>,
@@ -35,6 +61,9 @@ pub struct SqliteEditorApp {
     pub search_matches: Vec<CellCoord>,
     pub search_match_idx: usize,
     pub search_case_sensitive: bool,
+
+    // Dedicated Access-style SQL Query Window
+    pub query_window: QueryWindowState,
 }
 
 pub fn setup_korean_fonts(ctx: &egui::Context) {
@@ -133,6 +162,7 @@ impl SqliteEditorApp {
             search_matches: Vec::new(),
             search_match_idx: 0,
             search_case_sensitive: false,
+            query_window: QueryWindowState::default(),
         };
 
         // Automatically load initial sample database for immediate exploration
@@ -448,6 +478,57 @@ impl SqliteEditorApp {
         self.status_message = format!("총 {}개 셀 일괄 교체 완료", count);
         self.perform_search();
     }
+
+    pub fn run_sql_query(&mut self) {
+        let query = self.query_window.sql_text.trim();
+        if query.is_empty() {
+            self.query_window.status_message = Some("실행할 SQL 쿼리를 입력하세요.".to_string());
+            self.query_window.is_error = true;
+            return;
+        }
+
+        let start = Instant::now();
+        match self.db_service.execute_query(query, Some(10_000)) {
+            Ok((col_names, rows)) => {
+                let dur = start.elapsed();
+                let row_cnt = rows.len();
+                let col_cnt = col_names.len();
+                let table = TrackedTableBackend::from_query_result(col_names, rows);
+                self.query_window.result_table = Some(table);
+                self.query_window.is_error = false;
+                self.query_window.execution_dur = Some(dur);
+                self.query_window.status_message = Some(format!(
+                    "{}행 × {}열 조회 완료 ({:.2?})",
+                    row_cnt, col_cnt, dur
+                ));
+            }
+            Err(e) => {
+                self.query_window.is_error = true;
+                self.query_window.status_message = Some(format!("SQLite 실행 오류: {e}"));
+            }
+        }
+    }
+
+    pub fn copy_query_results_to_clipboard(&mut self) {
+        let Some(table) = &self.query_window.result_table else {
+            self.query_window.status_message = Some("복사할 쿼리 결과가 없습니다.".to_string());
+            self.query_window.is_error = true;
+            return;
+        };
+        let tsv = export_to_tsv(table, None, None);
+        if let Ok(mut cb) = Clipboard::new() {
+            if cb.set_text(tsv).is_ok() {
+                self.query_window.status_message = Some(format!(
+                    "결과 전체({}행)가 클립보드로 복사되었습니다.",
+                    table.row_count()
+                ));
+                self.query_window.is_error = false;
+                return;
+            }
+        }
+        self.query_window.status_message = Some("클립보드 접근에 실패했습니다.".to_string());
+        self.query_window.is_error = true;
+    }
 }
 
 impl eframe::App for SqliteEditorApp {
@@ -462,6 +543,11 @@ impl eframe::App for SqliteEditorApp {
         // F1: Help Dialog Toggle
         if ctx.input(|i| i.key_pressed(Key::F1)) {
             self.show_help_modal = !self.show_help_modal;
+        }
+
+        // F2: SQL Query Window Toggle (Access style)
+        if ctx.input(|i| i.key_pressed(Key::F2)) {
+            self.query_window.is_open = !self.query_window.is_open;
         }
 
         // F5: Refresh Current Table
@@ -689,6 +775,18 @@ impl eframe::App for SqliteEditorApp {
                 {
                     self.show_search_bar = if replace_active { false } else { true };
                     self.search_replace_mode = true;
+                }
+
+                let query_active = self.query_window.is_open;
+                if ui
+                    .selectable_label(
+                        query_active,
+                        format!("{} SQL 쿼리", egui_phosphor::regular::LIGHTNING),
+                    )
+                    .on_hover_text("별도의 Access 스타일 SQL 쿼리 조회 창 열기 (F2)")
+                    .clicked()
+                {
+                    self.query_window.is_open = !query_active;
                 }
 
                 ui.separator();
@@ -970,6 +1068,10 @@ impl eframe::App for SqliteEditorApp {
                             ui.label("편집 취소 / 검색바 닫기 / 팝업 닫기");
                             ui.end_row();
 
+                            ui.strong("F2");
+                            ui.label("별도의 SQL 쿼리 조회 창 열기 / 닫기 (Access 스타일)");
+                            ui.end_row();
+
                             ui.strong("F1");
                             ui.label("도움말 팝업 열기 / 닫기");
                             ui.end_row();
@@ -1027,6 +1129,107 @@ impl eframe::App for SqliteEditorApp {
                 self.show_dirty_switch_dialog = false;
                 self.pending_table_switch = None;
             }
+        }
+
+        // Dedicated Access-style SQL Query Window
+        let mut query_window_open = self.query_window.is_open;
+        let mut trigger_run_query = false;
+        let mut trigger_copy_query = false;
+        let mut preset_sql = None;
+
+        if query_window_open {
+            let selected_table_clone = self.selected_table.clone();
+            let qw = &mut self.query_window;
+
+            egui::Window::new("SQL 쿼리 조회 (Access 스타일)")
+                .open(&mut query_window_open)
+                .default_size([820.0, 560.0])
+                .min_size([520.0, 360.0])
+                .show(ui.ctx(), |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.strong(format!("{} SQL 쿼리식 입력:", egui_phosphor::regular::CODE));
+                        ui.label(RichText::new("(Ctrl + Enter 로 즉시 실행)").weak());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("샘플: 50개 행").clicked() {
+                                if let Some(table) = &selected_table_clone {
+                                    preset_sql = Some(format!("SELECT * FROM \"{table}\" LIMIT 50;"));
+                                } else {
+                                    preset_sql = Some("SELECT * FROM customers LIMIT 50;".to_string());
+                                }
+                            }
+                        });
+                    });
+
+                    // Multi-line Monospace SQL text editor
+                    let editor = egui::TextEdit::multiline(&mut qw.sql_text)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_rows(4)
+                        .desired_width(f32::INFINITY);
+                    ui.add(editor);
+
+                    // Execute & Export buttons
+                    ui.horizontal(|ui| {
+                        let ctrl_enter = ui.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::Enter));
+                        if ui
+                            .button(
+                                RichText::new(format!("{} 쿼리 실행 (Ctrl+Enter)", egui_phosphor::regular::LIGHTNING))
+                                    .strong()
+                                    .color(Color32::from_rgb(0, 150, 0)),
+                            )
+                            .clicked()
+                            || ctrl_enter
+                        {
+                            trigger_run_query = true;
+                        }
+
+                        if ui
+                            .button(format!("{} 결과 엑셀 복사 (TSV)", egui_phosphor::regular::COPY))
+                            .on_hover_text("현재 조회된 쿼리 결과 표 전체를 엑셀용 클립보드로 복사")
+                            .clicked()
+                        {
+                            trigger_copy_query = true;
+                        }
+
+                        if let Some(status) = &qw.status_message {
+                            ui.separator();
+                            if qw.is_error {
+                                ui.colored_label(Color32::from_rgb(220, 53, 69), status);
+                            } else {
+                                ui.colored_label(Color32::from_rgb(40, 167, 69), status);
+                            }
+                        }
+                    });
+
+                    ui.separator();
+
+                    // Results Spreadsheet Grid
+                    if let Some(table) = &mut qw.result_table {
+                        let available_height = ui.available_height().max(180.0);
+                        qw.result_view.show(
+                            table,
+                            &mut qw.result_config,
+                            Some(available_height),
+                            ui,
+                            Id::new("access_query_results_grid"),
+                        );
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("상단에 쿼리를 입력하고 [쿼리 실행] 버튼 또는 Ctrl+Enter 를 누르세요.");
+                        });
+                    }
+                });
+        }
+
+        self.query_window.is_open = query_window_open;
+        if let Some(sql) = preset_sql {
+            self.query_window.sql_text = sql;
+        }
+        if trigger_run_query {
+            self.run_sql_query();
+        }
+        if trigger_copy_query {
+            self.copy_query_results_to_clipboard();
         }
 
         // Central Table Grid Area

@@ -256,6 +256,55 @@ impl DbService {
         Ok((schema, data))
     }
 
+    /// Execute an arbitrary SQL query (e.g. SELECT with JOIN/GROUP BY) and return (columns, rows)
+    pub fn execute_query(
+        &self,
+        sql: &str,
+        max_rows: Option<usize>,
+    ) -> Result<(Vec<String>, Vec<Vec<Variant>>), rusqlite::Error> {
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
+
+        let mut stmt = conn.prepare(sql)?;
+        let column_names: Vec<String> = stmt
+            .column_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        let num_cols = column_names.len();
+
+        let mut data = Vec::new();
+        let mut rows = stmt.query([])?;
+        let limit = max_rows.unwrap_or(10_000);
+
+        while let Some(row) = rows.next()? {
+            let mut row_vals = Vec::with_capacity(num_cols);
+            for col_idx in 0..num_cols {
+                let val_ref = row.get_ref(col_idx)?;
+                let variant = match val_ref {
+                    ValueRef::Null => Variant::Empty,
+                    ValueRef::Integer(i) => Variant::Number(Number::I64(i)),
+                    ValueRef::Real(f) => Variant::Number(Number::F64(rvariant::F64(f))),
+                    ValueRef::Text(t) => {
+                        Variant::Str(String::from_utf8_lossy(t).into_owned())
+                    }
+                    ValueRef::Blob(b) => {
+                        Variant::Str(format!("<BLOB: {} bytes>", b.len()))
+                    }
+                };
+                row_vals.push(variant);
+            }
+            data.push(row_vals);
+            if data.len() >= limit {
+                break;
+            }
+        }
+
+        Ok((column_names, data))
+    }
+
     /// Atomically save in-memory modifications (updates, inserts, deletes) into SQLite.
     /// Creates an online backup prior to mutating the database.
     pub fn save_changes(

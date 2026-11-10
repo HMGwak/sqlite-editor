@@ -158,6 +158,57 @@ impl TrackedTableBackend {
         backend
     }
 
+    /// Construct read-only backend directly from arbitrary SQL query results
+    pub fn from_query_result(column_names: Vec<String>, rows: Vec<Vec<Variant>>) -> Self {
+        let mut backend = Self {
+            inner: VariantBackend::new(Vec::<(&str, VariantTy, Option<Variant>)>::new()),
+            tracker: DirtyTracker::new(),
+            column_names: Vec::new(),
+            schema: None,
+            custom_columns: HashMap::new(),
+            search_matches: HashSet::new(),
+            current_search_focus: None,
+        };
+
+        for (idx, name) in column_names.iter().enumerate() {
+            let col_uid = ColumnUid(idx as u32);
+            backend.column_names.push(name.clone());
+            backend.inner.insert_column(
+                Some(col_uid),
+                name.clone(),
+                vec![name.clone()],
+                VariantTy::Str,
+                None,
+                false,
+                true,
+            );
+            backend.custom_columns.insert(
+                col_uid,
+                BackendColumn {
+                    name: name.clone(),
+                    synonyms: vec![],
+                    ty: String::new(),
+                    is_sortable: true,
+                    is_required: false,
+                    is_used: true,
+                    is_skipped: false,
+                },
+            );
+        }
+
+        for row_vals in rows {
+            let row_entries: Vec<(ColumnUid, Variant)> = row_vals
+                .into_iter()
+                .enumerate()
+                .map(|(col_idx, v)| (ColumnUid(col_idx as u32), v))
+                .collect();
+            backend.inner.insert_row(row_entries);
+        }
+
+        backend.snapshot_as_baseline();
+        backend
+    }
+
     /// Load or reload data from a SQLite table
     pub fn load_db_table(&mut self, schema: TableSchema, rows: Vec<Vec<Variant>>) {
         self.inner.remove_all_columns();
