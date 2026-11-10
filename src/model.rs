@@ -8,6 +8,7 @@ use egui::{Color32, Id, Ui};
 use egui_tabular::frontend::TableFrontend;
 use egui_tabular::backends::variant::VariantBackend;
 use rvariant::{Variant, VariantTy};
+use crate::db::TableSchema;
 
 /// Information about a modified cell
 #[derive(Debug, Clone, PartialEq)]
@@ -45,12 +46,9 @@ impl DirtyTracker {
 
     /// Record a cell edit
     pub fn record_cell_change(&mut self, coord: CellCoord, new_val: Variant) {
-        // If this row is a newly added row, we don't necessarily treat individual cell edits
-        // as modifications of existing records, but still keep track
         let baseline = self.baseline_cells.get(&coord).cloned().unwrap_or(Variant::Empty);
 
         if baseline == new_val {
-            // Reverted back to original!
             self.dirty_cells.remove(&coord);
         } else {
             self.dirty_cells.insert(
@@ -69,12 +67,10 @@ impl DirtyTracker {
 
     pub fn record_delete_row(&mut self, row_uid: RowUid) {
         if self.new_rows.contains(&row_uid) {
-            // If it was just added in this session, simply forget it
             self.new_rows.remove(&row_uid);
         } else {
             self.deleted_rows.insert(row_uid);
         }
-        // Remove any cell dirty marks for this row
         self.dirty_cells.retain(|coord, _| coord.row_uid != row_uid);
     }
 
@@ -105,8 +101,6 @@ impl DirtyTracker {
     }
 }
 
-use crate::db::TableSchema;
-
 /// A wrapper around `VariantBackend` that integrates dirty tracking,
 /// visual styling for dirty cells (colors and corner triangles),
 /// and row management.
@@ -115,17 +109,33 @@ pub struct TrackedTableBackend {
     pub tracker: DirtyTracker,
     pub column_names: Vec<String>,
     pub schema: Option<TableSchema>,
+    pub custom_columns: HashMap<ColumnUid, BackendColumn>,
 }
 
 impl TrackedTableBackend {
     pub fn new(columns: Vec<(&'static str, VariantTy, Option<Variant>)>) -> Self {
         let names: Vec<String> = columns.iter().map(|(n, _, _)| n.to_string()).collect();
+        let mut custom_columns = HashMap::new();
+        for (idx, (n, _, _)) in columns.iter().enumerate() {
+            let col_uid = ColumnUid(idx as u32);
+            custom_columns.insert(col_uid, BackendColumn {
+                name: n.to_string(),
+                synonyms: vec![],
+                ty: String::new(), // Empty type string so no redundant 2nd row is rendered
+                is_sortable: true,
+                is_required: false,
+                is_used: true,
+                is_skipped: false,
+            });
+        }
+
         let inner = VariantBackend::new(columns);
         Self {
             inner,
             tracker: DirtyTracker::new(),
             column_names: names,
             schema: None,
+            custom_columns,
         }
     }
 
@@ -136,6 +146,7 @@ impl TrackedTableBackend {
             tracker: DirtyTracker::new(),
             column_names: Vec::new(),
             schema: None,
+            custom_columns: HashMap::new(),
         };
         backend.load_db_table(schema, rows);
         backend
@@ -145,23 +156,41 @@ impl TrackedTableBackend {
     pub fn load_db_table(&mut self, schema: TableSchema, rows: Vec<Vec<Variant>>) {
         self.inner.remove_all_columns();
         self.column_names.clear();
+        self.custom_columns.clear();
 
         for (idx, col) in schema.columns.iter().enumerate() {
+            // Clean column header: [PK] name if primary key, otherwise just name
             let display_name = if col.is_pk {
-                format!("🔑 {} ({})", col.name, col.data_type)
+                format!("[PK] {}", col.name)
             } else {
-                format!("{} ({})", col.name, col.data_type)
+                col.name.clone()
             };
+
             self.column_names.push(display_name.clone());
             let col_uid = ColumnUid(idx as u32);
+
             self.inner.insert_column(
                 Some(col_uid),
-                display_name,
+                display_name.clone(),
                 vec![col.name.clone()],
                 col.variant_ty.clone(),
                 None,
                 col.not_null,
                 true,
+            );
+
+            // Override BackendColumn with empty `ty` to prevent duplicate "String" line in header
+            self.custom_columns.insert(
+                col_uid,
+                BackendColumn {
+                    name: display_name,
+                    synonyms: vec![col.data_type.clone()],
+                    ty: String::new(), // Clean single-line header!
+                    is_sortable: true,
+                    is_required: col.not_null,
+                    is_used: true,
+                    is_skipped: false,
+                },
             );
         }
 
@@ -275,6 +304,7 @@ impl TableBackend for TrackedTableBackend {
     fn clear(&mut self) {
         self.inner.clear();
         self.tracker.clear();
+        self.custom_columns.clear();
     }
 
     fn is_clearable(&self) -> bool {
@@ -322,7 +352,7 @@ impl TableBackend for TrackedTableBackend {
     }
 
     fn column_info(&self, col_uid: ColumnUid) -> Option<&BackendColumn> {
-        self.inner.column_info(col_uid)
+        self.custom_columns.get(&col_uid).or_else(|| self.inner.column_info(col_uid))
     }
 
     fn col_uid(&self, col_idx: VisualColIdx) -> Option<ColumnUid> {
@@ -437,10 +467,26 @@ impl TableBackend for TrackedTableBackend {
     }
 }
 
-// Forward TableFrontend to inner
+// Forward TableFrontend to inner with Excel-style gridlines and cell styling
 impl TableFrontend for TrackedTableBackend {
     fn show_cell_view(&mut self, coord: CellCoord, ui: &mut Ui, id: Id) {
-        self.inner.show_cell_view(coord, ui, id);
+        let r = ui.max_rect();
+
+        // Cell padding so text doesn't touch the left border
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            self.inner.show_cell_view(coord, ui, id);
+        });
+
+        // Draw Excel-style cell borders (horizontal and vertical gridlines) on top of cell view
+        let border_color = Color32::from_rgb(222, 226, 230);
+        let stroke = egui::Stroke::new(1.0, border_color);
+        let painter = ui.painter();
+
+        // Bottom border
+        painter.hline(r.x_range(), r.max.y, stroke);
+        // Right border
+        painter.vline(r.max.x, r.y_range(), stroke);
     }
 
     fn show_cell_editor(
@@ -457,8 +503,12 @@ impl TableFrontend for TrackedTableBackend {
     }
 
     fn cell_color(&self, coord: CellCoord) -> Option<Color32> {
-        if self.tracker.is_cell_dirty(&coord) {
-            Some(Color32::from_rgb(255, 243, 205))
+        if self.tracker.is_row_deleted(coord.row_uid) {
+            Some(Color32::from_rgb(255, 230, 230)) // Soft light red for deleted row
+        } else if self.tracker.is_cell_dirty(&coord) {
+            Some(Color32::from_rgb(255, 243, 205)) // Warm amber for modified cell
+        } else if self.tracker.is_row_new(coord.row_uid) {
+            Some(Color32::from_rgb(235, 248, 238)) // Soft light green for newly added row
         } else {
             self.inner.cell_color(coord)
         }

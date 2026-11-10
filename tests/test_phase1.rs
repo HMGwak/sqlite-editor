@@ -121,7 +121,7 @@ fn test_phase1_04_grid_binding_and_table_switching() {
 
     assert_eq!(backend.row_count(), 5);
     assert_eq!(backend.column_names.len(), 6);
-    assert!(backend.column_names[0].contains("🔑 id"));
+    assert!(backend.column_names[0].contains("[PK] id"));
     assert!(!backend.tracker.is_dirty(), "로드 직후에는 Clean 상태여야 합니다.");
 
     // Verify cell access
@@ -136,7 +136,7 @@ fn test_phase1_04_grid_binding_and_table_switching() {
 
     assert_eq!(backend.row_count(), 5);
     assert_eq!(backend.column_names.len(), 6);
-    assert!(backend.column_names[0].contains("🔑 sku"));
+    assert!(backend.column_names[0].contains("[PK] sku"));
     assert!(!backend.tracker.is_dirty());
 
     let prod_row0_uid = backend.row_uid(VisualRowIdx(0)).unwrap();
@@ -150,7 +150,7 @@ fn test_phase1_04_grid_binding_and_table_switching() {
 
     assert_eq!(backend.row_count(), 4);
     assert_eq!(backend.column_names.len(), 5);
-    assert!(backend.column_names[0].contains("🔑 order_id"));
+    assert!(backend.column_names[0].contains("[PK] order_id"));
     assert!(!backend.tracker.is_dirty());
 
     let _ = fs::remove_file(db_path);

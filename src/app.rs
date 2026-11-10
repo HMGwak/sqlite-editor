@@ -27,6 +27,7 @@ pub struct SqliteEditorApp {
     pub target_row_idx: usize,
     pub pending_table_switch: Option<String>,
     pub show_dirty_switch_dialog: bool,
+    pub show_help_modal: bool,
 }
 
 pub fn setup_korean_fonts(ctx: &egui::Context) {
@@ -91,12 +92,13 @@ impl SqliteEditorApp {
             ]),
             table_view: TableView::new(),
             table_config: TableViewConfig::default(),
-            status_message: "SQLite DB 파일을 열거나, 상단의 '샘플 DB 로드'를 클릭하세요.".to_string(),
+            status_message: "준비 완료".to_string(),
             last_action_time: None,
             benchmark_result: None,
             target_row_idx: 0,
             pending_table_switch: None,
             show_dirty_switch_dialog: false,
+            show_help_modal: false,
         };
 
         // Automatically load initial sample database for immediate exploration
@@ -118,12 +120,12 @@ impl SqliteEditorApp {
         temp_path.push("sqlite_editor_sample_ecommerce.db");
 
         if let Err(e) = create_sample_database(&temp_path) {
-            self.status_message = format!("❌ 샘플 데이터베이스 생성 실패: {e}");
+            self.status_message = format!("샘플 데이터베이스 생성 실패: {e}");
             return;
         }
 
         self.load_database(temp_path);
-        self.status_message = "✅ 이커머스 샘플 SQLite 데이터베이스가 로드되었습니다 (3개 테이블).".to_string();
+        self.status_message = "샘플 SQLite 데이터베이스가 로드되었습니다 (3개 테이블).".to_string();
     }
 
     pub fn load_database(&mut self, path: PathBuf) {
@@ -143,12 +145,12 @@ impl SqliteEditorApp {
                         }
                     }
                     Err(e) => {
-                        self.status_message = format!("❌ 테이블 목록 조회 실패: {e}");
+                        self.status_message = format!("테이블 목록 조회 실패: {e}");
                     }
                 }
             }
             Err(e) => {
-                self.status_message = format!("❌ DB 파일 열기 실패: {e}");
+                self.status_message = format!("DB 파일 열기 실패: {e}");
             }
         }
     }
@@ -174,13 +176,13 @@ impl SqliteEditorApp {
                 self.selected_table = Some(table_name.to_string());
                 self.target_row_idx = 0;
                 self.status_message = format!(
-                    "테이블 '{}' 로드 완료 ({}행 × {}열, 기본키: {})",
+                    "테이블 '{}' ({}행 × {}열, 기본키: {})",
                     table_name, row_cnt, col_cnt, pk_str
                 );
                 self.last_action_time = Some(Instant::now());
             }
             Err(e) => {
-                self.status_message = format!("❌ 테이블 '{}' 로드 실패: {e}", table_name);
+                self.status_message = format!("테이블 '{}' 로드 실패: {e}", table_name);
             }
         }
     }
@@ -196,11 +198,11 @@ impl SqliteEditorApp {
 
     pub fn save_to_sqlite(&mut self) {
         let Some(selected_table) = &self.selected_table else {
-            self.status_message = "❌ 선택된 테이블이 없습니다.".to_string();
+            self.status_message = "선택된 테이블이 없습니다.".to_string();
             return;
         };
         let Some(schema) = &self.table.schema else {
-            self.status_message = "❌ 테이블 스키마 정보가 없습니다.".to_string();
+            self.status_message = "테이블 스키마 정보가 없습니다.".to_string();
             return;
         };
 
@@ -217,7 +219,7 @@ impl SqliteEditorApp {
                     String::new()
                 };
                 self.status_message = format!(
-                    "💾 DB 저장 완료! [추가: {}행, 수정: {}행, 삭제: {}행]{}",
+                    "저장 완료! (추가 {} / 수정 {} / 삭제 {}){}",
                     summary.inserted_count, summary.updated_count, summary.deleted_count, bak_str
                 );
                 // Snapshot clean baseline after successful commit
@@ -228,7 +230,7 @@ impl SqliteEditorApp {
                 }
             }
             Err(e) => {
-                self.status_message = format!("❌ DB 저장 실패 (전체 롤백됨): {e}");
+                self.status_message = format!("저장 실패 (롤백됨): {e}");
             }
         }
         self.last_action_time = Some(Instant::now());
@@ -241,21 +243,9 @@ impl SqliteEditorApp {
                 self.status_message = format!("행 #{} 삭제가 취소(복원)되었습니다.", row_idx);
             } else {
                 self.table.mark_row_deleted(row_uid);
-                self.status_message = format!("행 #{}이(가) 삭제 대기 목록에 추가되었습니다.", row_idx);
+                self.status_message = format!("행 #{} 삭제 예정 (저장 시 DB 반영)", row_idx);
             }
         }
-    }
-
-    fn copy_sample_to_clipboard(&mut self) {
-        let tsv = generate_sample_excel_tsv(20);
-        if let Ok(mut cb) = Clipboard::new() {
-            if cb.set_text(tsv).is_ok() {
-                self.status_message = "✅ 엑셀 샘플 20행 × 5열 데이터가 클립보드에 복사되었습니다!".to_string();
-                self.last_action_time = Some(Instant::now());
-                return;
-            }
-        }
-        self.status_message = "❌ 클립보드 접근에 실패했습니다.".to_string();
     }
 
     fn paste_from_clipboard_overwrite(&mut self) {
@@ -263,12 +253,12 @@ impl SqliteEditorApp {
             if let Ok(text) = cb.get_text() {
                 let parsed = parse_tsv(&text);
                 if parsed.is_empty() {
-                    self.status_message = "⚠️ 클립보드에 유효한 텍스트/테이블 데이터가 없습니다.".to_string();
+                    self.status_message = "클립보드에 유효한 테이블 데이터가 없습니다.".to_string();
                     return;
                 }
                 let modified = apply_paste_overwrite(&mut self.table, 0, 0, &parsed);
                 self.status_message = format!(
-                    "📥 클립보드에서 {}개 행을 덮어썼습니다 (수정된 셀: {}개).",
+                    "클립보드에서 {}개 행 덮어쓰기 완료 (수정 셀: {}개)",
                     parsed.len(),
                     modified
                 );
@@ -276,7 +266,7 @@ impl SqliteEditorApp {
                 return;
             }
         }
-        self.status_message = "❌ 클립보드 읽기에 실패했습니다.".to_string();
+        self.status_message = "클립보드 읽기에 실패했습니다.".to_string();
     }
 
     fn paste_from_clipboard_append(&mut self) {
@@ -284,16 +274,16 @@ impl SqliteEditorApp {
             if let Ok(text) = cb.get_text() {
                 let parsed = parse_tsv(&text);
                 if parsed.is_empty() {
-                    self.status_message = "⚠️ 클립보드에 유효한 데이터가 없습니다.".to_string();
+                    self.status_message = "클립보드에 유효한 데이터가 없습니다.".to_string();
                     return;
                 }
                 let count = apply_paste_append(&mut self.table, &parsed);
-                self.status_message = format!("➕ 클립보드에서 {}개의 신규 행을 추가했습니다.", count);
+                self.status_message = format!("클립보드에서 {}개 신규 행 추가 완료", count);
                 self.last_action_time = Some(Instant::now());
                 return;
             }
         }
-        self.status_message = "❌ 클립보드 읽기에 실패했습니다.".to_string();
+        self.status_message = "클립보드 읽기에 실패했습니다.".to_string();
     }
 
     fn copy_table_to_clipboard(&mut self) {
@@ -301,14 +291,14 @@ impl SqliteEditorApp {
         if let Ok(mut cb) = Clipboard::new() {
             if cb.set_text(tsv).is_ok() {
                 self.status_message = format!(
-                    "📤 전체 테이블({}행)이 클립보드(TSV/Excel)로 복사되었습니다.",
+                    "테이블 전체({}행)가 클립보드로 복사되었습니다.",
                     self.table.row_count()
                 );
                 self.last_action_time = Some(Instant::now());
                 return;
             }
         }
-        self.status_message = "❌ 클립보드 복사에 실패했습니다.".to_string();
+        self.status_message = "클립보드 복사에 실패했습니다.".to_string();
     }
 
     fn run_1000_rows_benchmark(&mut self) {
@@ -323,7 +313,7 @@ impl SqliteEditorApp {
 
         let total_dur = start.elapsed();
         let msg = format!(
-            "🚀 1,000행 일괄 처리 완료! 파싱: {:?}, 행 추가({}행): {:?}, 총 소요: {:?}",
+            "1,000행 일괄 처리: 파싱 {:?}, 행 추가({}행) {:?}, 총 {:?}",
             parse_dur, rows_added, insert_dur, total_dur
         );
         self.benchmark_result = Some(msg.clone());
@@ -336,17 +326,23 @@ impl eframe::App for SqliteEditorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // Global Keyboard shortcuts
+        // Keyboard Shortcuts
         let ctrl_or_cmd = ctx.input(|i| i.modifiers.command || i.modifiers.ctrl);
         let shift = ctx.input(|i| i.modifiers.shift);
 
-        // Ctrl+S / Cmd+S: Save to DB!
+        // F1: Help Dialog Toggle
+        if ctx.input(|i| i.key_pressed(Key::F1)) {
+            self.show_help_modal = !self.show_help_modal;
+        }
+
+        // Ctrl+S / Cmd+S: Save to SQLite
         if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::S)) {
             if self.table.tracker.is_dirty() {
                 self.save_to_sqlite();
             }
         }
 
+        // Ctrl+V: Paste Overwrite / Ctrl+Shift+V: Paste Append
         if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::V)) {
             if shift {
                 self.paste_from_clipboard_append();
@@ -355,74 +351,41 @@ impl eframe::App for SqliteEditorApp {
             }
         }
 
-        // Top Control Panel
+        // Top Control Panel (Clean, uncluttered, professional)
         Panel::top("top_toolbar").show(ui, |ui| {
-            ui.add_space(6.0);
+            ui.add_space(5.0);
             ui.horizontal_wrapped(|ui| {
-                ui.heading(RichText::new("📊 Rust SQLite Editor").strong());
+                ui.strong(RichText::new("SQLite Editor").size(15.0));
                 ui.separator();
 
-                // DB connection buttons
-                if ui
-                    .button(RichText::new("📂 파일 열기 (.db)").strong().color(Color32::from_rgb(0, 160, 220)))
-                    .on_hover_text("로컬 SQLite 데이터베이스 파일(.db, .sqlite)을 엽니다.")
-                    .clicked()
-                {
+                // Group 1: Database File
+                if ui.button("열기").on_hover_text("로컬 SQLite 파일(.db) 선택").clicked() {
                     self.open_db_file();
                 }
-
-                if ui
-                    .button("⚡ 샘플 DB 로드")
-                    .on_hover_text("다양한 테이블과 자료형이 포함된 샘플 DB를 즉시 생성하여 로드합니다.")
-                    .clicked()
-                {
+                if ui.button("샘플 DB").on_hover_text("이커머스 샘플 DB 생성 및 열기").clicked() {
                     self.load_sample_database();
                 }
-
-                if ui
-                    .button("🔄 새로고침")
-                    .on_hover_text("현재 데이터베이스 및 테이블을 다시 읽어옵니다.")
-                    .clicked()
-                {
+                if ui.button("새로고침").on_hover_text("현재 테이블 다시 읽기").clicked() {
                     self.refresh_current();
                 }
 
                 ui.separator();
 
-                // Editing & Excel actions
-                if ui
-                    .button("📋 샘플 엑셀 복사")
-                    .on_hover_text("20행 5열의 엑셀 호환 TSV 데이터를 클립보드에 복사합니다.")
-                    .clicked()
-                {
-                    self.copy_sample_to_clipboard();
+                // Group 2: Clipboard
+                if ui.button("복사").on_hover_text("전체 테이블을 엑셀(TSV)로 복사 (Ctrl+C)").clicked() {
+                    self.copy_table_to_clipboard();
                 }
-
-                if ui
-                    .button(RichText::new("📥 덮어쓰기 붙여넣기 (Ctrl+V)").strong())
-                    .clicked()
-                {
+                if ui.button("붙여넣기").on_hover_text("클립보드 내용으로 기존 셀 덮어쓰기 (Ctrl+V)").clicked() {
                     self.paste_from_clipboard_overwrite();
                 }
-
-                if ui
-                    .button("➕ 신규 행 추가 붙여넣기 (Ctrl+Shift+V)")
-                    .clicked()
-                {
+                if ui.button("신규행 붙여넣기").on_hover_text("클립보드 데이터를 새 행으로 추가 (Ctrl+Shift+V)").clicked() {
                     self.paste_from_clipboard_append();
-                }
-
-                if ui
-                    .button("📤 전체 복사 (Ctrl+C)")
-                    .clicked()
-                {
-                    self.copy_table_to_clipboard();
                 }
 
                 ui.separator();
 
-                // Row operations
-                if ui.button("➕ 행 추가").clicked() {
+                // Group 3: Row Operations
+                if ui.button("행 추가").on_hover_text("테이블 끝에 새 빈 행 추가").clicked() {
                     self.table.create_row([]);
                     self.status_message = "새 행이 추가되었습니다.".to_string();
                 }
@@ -435,32 +398,34 @@ impl eframe::App for SqliteEditorApp {
                 );
 
                 if ui
-                    .button(RichText::new("🗑 삭제/복원").color(Color32::from_rgb(220, 100, 100)))
-                    .on_hover_text("지정한 행을 삭제 상태로 전환하거나 복원합니다 (좌측 행 번호 우클릭으로도 가능).")
+                    .button(RichText::new("행 삭제/복원").color(Color32::from_rgb(215, 60, 60)))
+                    .on_hover_text("지정한 행을 삭제/복원 (좌측 행 번호 우클릭으로도 가능)")
                     .clicked()
                 {
                     let row_idx = self.target_row_idx;
                     self.delete_row_by_index(row_idx);
                 }
 
+                ui.separator();
+
+                // Group 4: Save & Revert
                 let is_dirty = self.table.tracker.is_dirty();
 
                 if ui
-                    .add_enabled(is_dirty, egui::Button::new(RichText::new("🔄 되돌리기").color(Color32::from_rgb(200, 80, 80))))
-                    .on_hover_text("모든 셀 수정 및 행 추가/삭제 내역을 원복합니다.")
+                    .add_enabled(is_dirty, egui::Button::new(RichText::new("되돌리기").color(Color32::from_rgb(180, 70, 70))))
+                    .on_hover_text("모든 수정 내역을 원래대로 되돌림")
                     .clicked()
                 {
                     self.table.revert_all();
-                    self.status_message = "모든 변경사항이 원래대로 되돌려졌습니다.".to_string();
+                    self.status_message = "모든 변경사항이 원복되었습니다.".to_string();
                 }
 
-                // Real Safe SQLite Transaction Save Button!
                 if ui
                     .add_enabled(
                         is_dirty,
-                        egui::Button::new(RichText::new("💾 DB에 저장 (Ctrl+S)").strong().color(Color32::from_rgb(40, 160, 60))),
+                        egui::Button::new(RichText::new("저장").strong().color(Color32::from_rgb(34, 139, 34))),
                     )
-                    .on_hover_text("SQLite 트랜잭션을 통해 변경사항을 실제 .db 파일에 안전하게 영구 저장합니다. 저장 전 자동 백업(.bak)이 생성됩니다.")
+                    .on_hover_text("자동 백업 생성 후 SQLite에 안전하게 영구 저장 (Ctrl+S)")
                     .clicked()
                 {
                     self.save_to_sqlite();
@@ -468,50 +433,54 @@ impl eframe::App for SqliteEditorApp {
 
                 ui.separator();
 
-                if ui
-                    .button(RichText::new("⚡ 1,000행 벤치마크").italics())
-                    .clicked()
-                {
+                // Group 5: Help & Utilities
+                if ui.button("도움말 (F1)").on_hover_text("단축키 및 상세 가이드").clicked() {
+                    self.show_help_modal = true;
+                }
+
+                if ui.button("1,000행 벤치").on_hover_text("1,000행 일괄 처리 성능 측정").clicked() {
                     self.run_1000_rows_benchmark();
                 }
             });
 
-            ui.add_space(4.0);
+            ui.add_space(3.0);
+
+            // Clean single-line info strip under toolbar
             ui.horizontal(|ui| {
                 if let Some(fname) = self.db_service.file_name() {
-                    ui.label(RichText::new(format!("📁 DB: {fname}")).strong().color(Color32::LIGHT_GREEN));
+                    ui.label(RichText::new(format!("DB: {fname}")).strong());
                     ui.separator();
                 }
                 if let Some(tname) = &self.selected_table {
-                    ui.label(RichText::new(format!("📋 테이블: {tname}")).strong().color(Color32::from_rgb(255, 215, 0)));
+                    ui.label(RichText::new(format!("테이블: {tname}")).strong().color(Color32::from_rgb(0, 102, 204)));
                     ui.separator();
                 }
-                ui.label(RichText::new(&self.status_message).small().color(Color32::LIGHT_GRAY));
+                ui.label(RichText::new(&self.status_message).small().color(Color32::DARK_GRAY));
             });
-            ui.add_space(4.0);
+            ui.add_space(3.0);
         });
 
-        // Left Sidebar: Tables List
+        // Left Sidebar: Tables List (Clean and neat)
         Panel::left("tables_sidebar")
             .resizable(true)
-            .default_size(210.0)
+            .default_size(200.0)
             .show(ui, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.strong("📋 테이블 목록");
+                    ui.strong("테이블");
                     ui.label(format!("({})", self.table_summaries.len()));
                 });
                 ui.separator();
 
                 if self.table_summaries.is_empty() {
-                    ui.label(RichText::new("열린 데이터베이스가 없거나\n테이블이 없습니다.").weak());
+                    ui.label(RichText::new("열린 테이블 없음").weak());
                 } else {
                     ScrollArea::vertical().show(ui, |ui| {
                         let current_selected = self.selected_table.clone();
                         let mut clicked_table = None;
                         for table in &self.table_summaries {
                             let is_selected = current_selected.as_deref() == Some(&table.name);
-                            let text = format!("📄 {}  ({}행)", table.name, table.row_count);
+                            let text = format!("{} ({})", table.name, table.row_count);
 
                             let resp = ui.selectable_label(is_selected, text);
                             if resp.clicked() && !is_selected {
@@ -525,83 +494,113 @@ impl eframe::App for SqliteEditorApp {
                 }
             });
 
-        // Bottom Info & Dirty Tracking Panel
+        // Bottom Compact Status Bar (Replaces 160px height panel with compact 30px bar)
         Panel::bottom("bottom_info_panel")
-            .resizable(true)
-            .default_size(150.0)
+            .resizable(false)
+            .default_size(28.0)
             .show(ui, |ui| {
-                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.strong("📌 변경사항 추적 상태:");
-
                     let dirty_count = self.table.tracker.dirty_cells_count();
                     let new_rows_count = self.table.tracker.new_rows.len();
                     let deleted_rows_count = self.table.tracker.deleted_rows.len();
                     let total_rows = self.table.row_count();
 
                     if dirty_count == 0 && new_rows_count == 0 && deleted_rows_count == 0 {
-                        ui.colored_label(Color32::GREEN, "● Clean (저장 완료 / 변경사항 없음)");
+                        ui.colored_label(Color32::from_rgb(46, 125, 50), "저장됨 (변경 없음)");
                     } else {
                         ui.colored_label(
-                            Color32::from_rgb(255, 140, 0),
+                            Color32::from_rgb(230, 81, 0),
                             format!(
-                                "● 미저장 변경: [수정: {}개, 추가: {}개, 삭제: {}개]",
+                                "미저장: 수정 {} / 추가 {} / 삭제 {}",
                                 dirty_count, new_rows_count, deleted_rows_count
                             ),
                         );
                     }
 
                     ui.separator();
-                    ui.label(format!("현재 표시: {}행 × {}열", total_rows, self.table.column_names.len()));
+                    ui.label(format!("행: {} | 열: {}", total_rows, self.table.column_names.len()));
 
                     if let Some(schema) = &self.table.schema {
-                        ui.separator();
-                        let pks = if schema.primary_keys.is_empty() {
-                            "None".to_string()
-                        } else {
-                            schema.primary_keys.join(", ")
-                        };
-                        ui.label(format!("기본키(PK): 🔑 {}", pks));
+                        if !schema.primary_keys.is_empty() {
+                            ui.separator();
+                            ui.label(format!("기본키: {}", schema.primary_keys.join(", ")));
+                        }
                     }
+
+                    ui.separator();
+                    ui.label(RichText::new("도움말 및 단축키: F1").weak());
 
                     if let Some(bench) = &self.benchmark_result {
                         ui.separator();
-                        ui.colored_label(Color32::GOLD, bench);
-                    }
-                });
-
-                ui.separator();
-
-                // Detailed dirty items log
-                ScrollArea::vertical().max_height(85.0).show(ui, |ui| {
-                    if !self.table.tracker.is_dirty() {
-                        ui.label(RichText::new("현재 수정된 셀이나 추가/삭제된 행이 없습니다. 테이블 셀을 더블클릭하거나 복사·붙여넣기, 행 삭제를 실행해보세요.").weak());
-                    } else {
-                        ui.horizontal_wrapped(|ui| {
-                            for (coord, change) in &self.table.tracker.dirty_cells {
-                                let col_name = self.table.col_name(coord.col_uid);
-                                let row_num = coord.row_uid.0;
-                                ui.label(RichText::new(format!(
-                                    "[수정] 행 {}, 열 '{}': \"{}\" ➔ \"{}\"",
-                                    row_num, col_name, change.old_value, change.new_value
-                                )).color(Color32::from_rgb(255, 193, 7)));
-                            }
-                            for row_uid in &self.table.tracker.new_rows {
-                                ui.label(RichText::new(format!(
-                                    "[신규 행] 행 ID {} (추가됨)",
-                                    row_uid.0
-                                )).color(Color32::from_rgb(76, 175, 80)));
-                            }
-                            for row_uid in &self.table.tracker.deleted_rows {
-                                ui.label(RichText::new(format!(
-                                    "[삭제 예정] 행 ID {} (제거됨)",
-                                    row_uid.0
-                                )).color(Color32::from_rgb(244, 67, 54)));
-                            }
-                        });
+                        ui.colored_label(Color32::from_rgb(180, 100, 0), bench);
                     }
                 });
             });
+
+        // F1 Help Modal Dialog
+        if self.show_help_modal {
+            egui::Window::new("도움말 및 단축키 (F1)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.set_width(460.0);
+                    ui.heading("단축키 안내");
+                    ui.add_space(4.0);
+                    egui::Grid::new("help_shortcuts_grid")
+                        .striped(true)
+                        .num_columns(2)
+                        .spacing([24.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.strong("Ctrl + S");
+                            ui.label("데이터베이스에 안전하게 영구 저장 (자동 백업 생성)");
+                            ui.end_row();
+
+                            ui.strong("Ctrl + V");
+                            ui.label("클립보드 엑셀 데이터를 현재 셀부터 덮어쓰기");
+                            ui.end_row();
+
+                            ui.strong("Ctrl + Shift + V");
+                            ui.label("클립보드 데이터를 새 행으로 일괄 추가");
+                            ui.end_row();
+
+                            ui.strong("Ctrl + C");
+                            ui.label("전체 테이블을 엑셀(TSV) 형식으로 클립보드에 복사");
+                            ui.end_row();
+
+                            ui.strong("더블클릭 / Enter");
+                            ui.label("선택한 셀 내용 직접 편집");
+                            ui.end_row();
+
+                            ui.strong("Tab / Shift + Tab");
+                            ui.label("다음/이전 셀로 이동 및 편집 확정");
+                            ui.end_row();
+
+                            ui.strong("Esc");
+                            ui.label("셀 편집 취소 또는 팝업 창 닫기");
+                            ui.end_row();
+
+                            ui.strong("행 번호 우클릭");
+                            ui.label("해당 행 삭제/복원 ('Skip row' 체크 시 취소선 표시)");
+                            ui.end_row();
+                        });
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.heading("안전 저장 및 백업 원칙");
+                    ui.add_space(4.0);
+                    ui.label("• 셀을 수정하거나 행을 추가/삭제해도 즉시 파일에 쓰이지 않습니다.");
+                    ui.label("• '저장(Ctrl+S)'을 누르면 원본 DB가 자동으로 백업(*.bak)된 후 반영됩니다.");
+                    ui.label("• 저장 전 언제든 '되돌리기' 버튼으로 모든 변경사항을 원복할 수 있습니다.");
+
+                    ui.add_space(14.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
+                        if ui.button("닫기 (Esc)").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                            self.show_help_modal = false;
+                        }
+                    });
+                });
+        }
 
         // Unsaved changes confirmation dialog if switching tables
         if self.show_dirty_switch_dialog {
@@ -609,7 +608,7 @@ impl eframe::App for SqliteEditorApp {
             let mut cancel = false;
             let pending_name = self.pending_table_switch.clone().unwrap_or_default();
 
-            egui::Window::new("⚠️ 저장되지 않은 변경사항")
+            egui::Window::new("저장되지 않은 변경사항")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
