@@ -10,6 +10,6 @@ egui_tabular = "0.2.0"
 tabular_core = "0.2.0"
 tabular_derive = "0.2.0"
 rvariant = "0.2.0"
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 rfd = "0.15" # For native file dialogs (open sqlite file)
 arboard = "3.4" # Clipboard access if needed

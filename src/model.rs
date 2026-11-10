@@ -205,11 +205,27 @@ impl TrackedTableBackend {
         for (coord, change) in &self.tracker.dirty_cells {
             self.inner.set(*coord, change.old_value.clone());
         }
-        // Remove newly added rows
-        // (For simplicity in PoC, we will reload from baseline or remove added rows)
+        // Restore deleted rows
+        for row_uid in &self.tracker.deleted_rows {
+            self.inner.skip_row(*row_uid, false);
+        }
         self.tracker.dirty_cells.clear();
         self.tracker.new_rows.clear();
         self.tracker.deleted_rows.clear();
+        self.update_metadata_indicators();
+    }
+
+    /// Mark a row as deleted (draws strike-through cross, adds to deleted_rows)
+    pub fn mark_row_deleted(&mut self, row_uid: RowUid) {
+        self.tracker.record_delete_row(row_uid);
+        self.inner.skip_row(row_uid, true);
+        self.update_metadata_indicators();
+    }
+
+    /// Unmark a deleted row
+    pub fn unmark_row_deleted(&mut self, row_uid: RowUid) {
+        self.tracker.deleted_rows.remove(&row_uid);
+        self.inner.skip_row(row_uid, false);
         self.update_metadata_indicators();
     }
 
@@ -383,10 +399,16 @@ impl TableBackend for TrackedTableBackend {
     }
 
     fn skip_row(&mut self, row_uid: RowUid, skipped: bool) {
+        if skipped {
+            self.tracker.record_delete_row(row_uid);
+        } else {
+            self.tracker.deleted_rows.remove(&row_uid);
+        }
         self.inner.skip_row(row_uid, skipped);
     }
 
     fn un_skip_all_rows(&mut self) {
+        self.tracker.deleted_rows.clear();
         self.inner.un_skip_all_rows();
     }
 

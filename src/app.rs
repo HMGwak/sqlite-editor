@@ -10,6 +10,7 @@ use egui_tabular::{TableBackend, TableView};
 use rvariant::{Variant, VariantTy};
 use std::path::PathBuf;
 use std::time::Instant;
+use tabular_core::backend::VisualRowIdx;
 
 pub struct SqliteEditorApp {
     pub db_service: DbService,
@@ -23,6 +24,7 @@ pub struct SqliteEditorApp {
     pub last_action_time: Option<Instant>,
     pub benchmark_result: Option<String>,
 
+    pub target_row_idx: usize,
     pub pending_table_switch: Option<String>,
     pub show_dirty_switch_dialog: bool,
 }
@@ -45,6 +47,7 @@ impl SqliteEditorApp {
             status_message: "SQLite DB 파일을 열거나, 상단의 '샘플 DB 로드'를 클릭하세요.".to_string(),
             last_action_time: None,
             benchmark_result: None,
+            target_row_idx: 0,
             pending_table_switch: None,
             show_dirty_switch_dialog: false,
         };
@@ -122,6 +125,7 @@ impl SqliteEditorApp {
 
                 self.table.load_db_table(schema, rows);
                 self.selected_table = Some(table_name.to_string());
+                self.target_row_idx = 0;
                 self.status_message = format!(
                     "테이블 '{}' 로드 완료 ({}행 × {}열, 기본키: {})",
                     table_name, row_cnt, col_cnt, pk_str
@@ -140,6 +144,58 @@ impl SqliteEditorApp {
         }
         if let Some(current) = self.selected_table.clone() {
             self.load_table_data(&current, true);
+        }
+    }
+
+    pub fn save_to_sqlite(&mut self) {
+        let Some(selected_table) = &self.selected_table else {
+            self.status_message = "❌ 선택된 테이블이 없습니다.".to_string();
+            return;
+        };
+        let Some(schema) = &self.table.schema else {
+            self.status_message = "❌ 테이블 스키마 정보가 없습니다.".to_string();
+            return;
+        };
+
+        match self.db_service.save_changes(
+            selected_table,
+            schema,
+            &self.table.tracker,
+            &self.table,
+        ) {
+            Ok(summary) => {
+                let bak_str = if let Some(bak) = summary.backup_path {
+                    format!(" [자동 백업: {}]", bak.file_name().unwrap_or_default().to_string_lossy())
+                } else {
+                    String::new()
+                };
+                self.status_message = format!(
+                    "💾 DB 저장 완료! [추가: {}행, 수정: {}행, 삭제: {}행]{}",
+                    summary.inserted_count, summary.updated_count, summary.deleted_count, bak_str
+                );
+                // Snapshot clean baseline after successful commit
+                self.table.snapshot_as_baseline();
+                // Refresh table summaries to update row count badge
+                if let Ok(tables) = self.db_service.list_tables() {
+                    self.table_summaries = tables;
+                }
+            }
+            Err(e) => {
+                self.status_message = format!("❌ DB 저장 실패 (전체 롤백됨): {e}");
+            }
+        }
+        self.last_action_time = Some(Instant::now());
+    }
+
+    pub fn delete_row_by_index(&mut self, row_idx: usize) {
+        if let Some(row_uid) = self.table.row_uid(VisualRowIdx(row_idx)) {
+            if self.table.tracker.is_row_deleted(row_uid) {
+                self.table.unmark_row_deleted(row_uid);
+                self.status_message = format!("행 #{} 삭제가 취소(복원)되었습니다.", row_idx);
+            } else {
+                self.table.mark_row_deleted(row_uid);
+                self.status_message = format!("행 #{}이(가) 삭제 대기 목록에 추가되었습니다.", row_idx);
+            }
         }
     }
 
@@ -237,6 +293,13 @@ impl eframe::App for SqliteEditorApp {
         let ctrl_or_cmd = ctx.input(|i| i.modifiers.command || i.modifiers.ctrl);
         let shift = ctx.input(|i| i.modifiers.shift);
 
+        // Ctrl+S / Cmd+S: Save to DB!
+        if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::S)) {
+            if self.table.tracker.is_dirty() {
+                self.save_to_sqlite();
+            }
+        }
+
         if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::V)) {
             if shift {
                 self.paste_from_clipboard_append();
@@ -311,29 +374,49 @@ impl eframe::App for SqliteEditorApp {
 
                 ui.separator();
 
-                if ui.button("➕ 행 1개 추가").clicked() {
+                // Row operations
+                if ui.button("➕ 행 추가").clicked() {
                     self.table.create_row([]);
                     self.status_message = "새 행이 추가되었습니다.".to_string();
+                }
+
+                let max_row = self.table.row_count().saturating_sub(1);
+                ui.add(
+                    egui::DragValue::new(&mut self.target_row_idx)
+                        .range(0..=max_row)
+                        .prefix("행 #"),
+                );
+
+                if ui
+                    .button(RichText::new("🗑 삭제/복원").color(Color32::from_rgb(220, 100, 100)))
+                    .on_hover_text("지정한 행을 삭제 상태로 전환하거나 복원합니다 (좌측 행 번호 우클릭으로도 가능).")
+                    .clicked()
+                {
+                    let row_idx = self.target_row_idx;
+                    self.delete_row_by_index(row_idx);
                 }
 
                 let is_dirty = self.table.tracker.is_dirty();
 
                 if ui
                     .add_enabled(is_dirty, egui::Button::new(RichText::new("🔄 되돌리기").color(Color32::from_rgb(200, 80, 80))))
-                    .on_hover_text("수정된 셀 내용을 저장 전 원래 값으로 되돌립니다.")
+                    .on_hover_text("모든 셀 수정 및 행 추가/삭제 내역을 원복합니다.")
                     .clicked()
                 {
                     self.table.revert_all();
                     self.status_message = "모든 변경사항이 원래대로 되돌려졌습니다.".to_string();
                 }
 
+                // Real Safe SQLite Transaction Save Button!
                 if ui
-                    .add_enabled(is_dirty, egui::Button::new(RichText::new("💾 저장 시뮬레이션").color(Color32::from_rgb(40, 160, 60))))
-                    .on_hover_text("현재 상태를 새로운 기준(Clean Baseline)으로 확정합니다.")
+                    .add_enabled(
+                        is_dirty,
+                        egui::Button::new(RichText::new("💾 DB에 저장 (Ctrl+S)").strong().color(Color32::from_rgb(40, 160, 60))),
+                    )
+                    .on_hover_text("SQLite 트랜잭션을 통해 변경사항을 실제 .db 파일에 안전하게 영구 저장합니다. 저장 전 자동 백업(.bak)이 생성됩니다.")
                     .clicked()
                 {
-                    self.table.snapshot_as_baseline();
-                    self.status_message = "변경사항이 성공적으로 저장(기준 확정)되었습니다.".to_string();
+                    self.save_to_sqlite();
                 }
 
                 ui.separator();
@@ -406,14 +489,18 @@ impl eframe::App for SqliteEditorApp {
 
                     let dirty_count = self.table.tracker.dirty_cells_count();
                     let new_rows_count = self.table.tracker.new_rows.len();
+                    let deleted_rows_count = self.table.tracker.deleted_rows.len();
                     let total_rows = self.table.row_count();
 
-                    if dirty_count == 0 && new_rows_count == 0 {
-                        ui.colored_label(Color32::GREEN, "● Clean (수정 없음)");
+                    if dirty_count == 0 && new_rows_count == 0 && deleted_rows_count == 0 {
+                        ui.colored_label(Color32::GREEN, "● Clean (저장 완료 / 변경사항 없음)");
                     } else {
                         ui.colored_label(
                             Color32::from_rgb(255, 140, 0),
-                            format!("● 수정 셀: {}개 | 신규 행: {}개 (Unsaved)", dirty_count, new_rows_count),
+                            format!(
+                                "● 미저장 변경: [수정: {}개, 추가: {}개, 삭제: {}개]",
+                                dirty_count, new_rows_count, deleted_rows_count
+                            ),
                         );
                     }
 
@@ -441,7 +528,7 @@ impl eframe::App for SqliteEditorApp {
                 // Detailed dirty items log
                 ScrollArea::vertical().max_height(85.0).show(ui, |ui| {
                     if !self.table.tracker.is_dirty() {
-                        ui.label(RichText::new("현재 수정된 셀이나 추가된 행이 없습니다. 테이블 셀을 더블클릭하거나 복사·붙여넣기를 실행해보세요.").weak());
+                        ui.label(RichText::new("현재 수정된 셀이나 추가/삭제된 행이 없습니다. 테이블 셀을 더블클릭하거나 복사·붙여넣기, 행 삭제를 실행해보세요.").weak());
                     } else {
                         ui.horizontal_wrapped(|ui| {
                             for (coord, change) in &self.table.tracker.dirty_cells {
@@ -454,9 +541,15 @@ impl eframe::App for SqliteEditorApp {
                             }
                             for row_uid in &self.table.tracker.new_rows {
                                 ui.label(RichText::new(format!(
-                                    "[신규 행] 행 ID {} (새로 추가됨)",
+                                    "[신규 행] 행 ID {} (추가됨)",
                                     row_uid.0
                                 )).color(Color32::from_rgb(76, 175, 80)));
+                            }
+                            for row_uid in &self.table.tracker.deleted_rows {
+                                ui.label(RichText::new(format!(
+                                    "[삭제 예정] 행 ID {} (제거됨)",
+                                    row_uid.0
+                                )).color(Color32::from_rgb(244, 67, 54)));
                             }
                         });
                     }
