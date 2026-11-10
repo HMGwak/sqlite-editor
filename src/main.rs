@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use sqlite_editor::app::SqliteEditorApp;
 
 fn main() -> eframe::Result<()> {
@@ -5,7 +7,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1150.0, 750.0])
             .with_min_inner_size([700.0, 450.0])
-            .with_title("Rust SQLite Editor - 0단계 egui_tabular 기술 검증"),
+            .with_title("Rust SQLite Editor"),
         ..Default::default()
     };
 

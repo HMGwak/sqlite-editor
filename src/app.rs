@@ -29,8 +29,55 @@ pub struct SqliteEditorApp {
     pub show_dirty_switch_dialog: bool,
 }
 
+pub fn setup_korean_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // 1. Try Windows Malgun Gothic from disk
+    let mut malgun_loaded = false;
+    let windows_font_paths = [
+        "C:\\Windows\\Fonts\\malgun.ttf",
+        "C:\\Windows\\Fonts\\malgunbd.ttf",
+    ];
+    for path in windows_font_paths {
+        if let Ok(data) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "malgun".to_string(),
+                std::sync::Arc::new(egui::FontData::from_owned(data)),
+            );
+            malgun_loaded = true;
+            break;
+        }
+    }
+
+    // 2. Embedded NanumGothic as universal reliable fallback
+    const NANUM_GOTHIC: &[u8] = include_bytes!("../assets/NanumGothic-Regular.ttf");
+    fonts.font_data.insert(
+        "nanum_gothic".to_string(),
+        std::sync::Arc::new(egui::FontData::from_static(NANUM_GOTHIC)),
+    );
+
+    // 3. Put Korean font at the top priority of proportional and monospace font families
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        if malgun_loaded {
+            family.insert(0, "malgun".to_string());
+        }
+        family.insert(if malgun_loaded { 1 } else { 0 }, "nanum_gothic".to_string());
+    }
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        if malgun_loaded {
+            family.insert(0, "malgun".to_string());
+        }
+        family.insert(if malgun_loaded { 1 } else { 0 }, "nanum_gothic".to_string());
+    }
+
+    ctx.set_fonts(fonts);
+}
+
 impl SqliteEditorApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Setup Korean fonts for crisp CJK glyph rendering
+        setup_korean_fonts(&cc.egui_ctx);
+
         let mut app = Self {
             db_service: DbService::new(),
             table_summaries: Vec::new(),
