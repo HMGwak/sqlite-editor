@@ -64,6 +64,10 @@ pub struct SqliteEditorApp {
 
     // Dedicated Access-style SQL Query Window
     pub query_window: QueryWindowState,
+
+    // Smart Paste / Win+V Clipboard History Support Modal
+    pub show_smart_paste_modal: bool,
+    pub smart_paste_text: String,
 }
 
 pub fn setup_korean_fonts(ctx: &egui::Context) {
@@ -163,6 +167,8 @@ impl SqliteEditorApp {
             search_match_idx: 0,
             search_case_sensitive: false,
             query_window: QueryWindowState::default(),
+            show_smart_paste_modal: false,
+            smart_paste_text: String::new(),
         };
 
         // Automatically load initial sample database for immediate exploration
@@ -591,8 +597,32 @@ impl eframe::App for SqliteEditorApp {
             self.open_db_file();
         }
 
+        // Detect OS-level Paste Events (e.g. from Win+V selection, WM_PASTE, etc.)
+        let mut os_paste_text = None;
+        ctx.input(|i| {
+            for event in &i.raw.events {
+                if let egui::Event::Paste(text) = event {
+                    os_paste_text = Some(text.clone());
+                }
+            }
+        });
+
         // Grid-level shortcuts (active when not directly editing cell text)
         if !wants_keyboard {
+            // Handle OS-level Paste (including Win+V clipboard history selection!)
+            if let Some(text) = os_paste_text {
+                let parsed = parse_tsv(&text);
+                if !parsed.is_empty() {
+                    let count = apply_paste_overwrite(&mut self.table, 0, 0, &parsed);
+                    self.status_message = format!(
+                        "클립보드(Win+V)에서 {}개 행 덮어쓰기 완료 ({}개 셀 수정)",
+                        parsed.len(),
+                        count
+                    );
+                    self.last_action_time = Some(Instant::now());
+                }
+            }
+
             // Ctrl+C: Copy Table to Clipboard
             if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::C)) {
                 self.copy_table_to_clipboard();
@@ -715,6 +745,13 @@ impl eframe::App for SqliteEditorApp {
                     .clicked()
                 {
                     self.paste_from_clipboard_append();
+                }
+                if ui
+                    .button(format!("{} 스마트 붙여넣기", egui_phosphor::regular::CLIPBOARD_TEXT))
+                    .on_hover_text("사내 보안(M365 DLP) 환경에서 Win+V 클립보드 히스토리 직접 주입 창 열기")
+                    .clicked()
+                {
+                    self.show_smart_paste_modal = true;
                 }
 
                 ui.separator();
@@ -1230,6 +1267,78 @@ impl eframe::App for SqliteEditorApp {
         }
         if trigger_copy_query {
             self.copy_query_results_to_clipboard();
+        }
+
+        // Smart Paste Modal for M365 DLP / Win+V Clipboard History
+        if self.show_smart_paste_modal {
+            egui::Window::new("스마트 붙여넣기 (Win + V 지원)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([560.0, 360.0])
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label(RichText::new("사내 보안(M365 DLP) 환경 가이드:").strong());
+                    ui.label("아래 텍스트 상자에 커서를 두고 Win + V 를 눌러 클립보드 기록에서 항목을 선택하면 보안 차단을 우회하여 주입됩니다.");
+                    ui.add_space(6.0);
+
+                    let edit = egui::TextEdit::multiline(&mut self.smart_paste_text)
+                        .desired_rows(6)
+                        .hint_text("여기에 Ctrl+V 또는 Win+V 로 엑셀 데이터를 붙여넣으세요...")
+                        .desired_width(f32::INFINITY);
+                    ui.add(edit);
+
+                    ui.add_space(8.0);
+                    let parsed = parse_tsv(&self.smart_paste_text);
+                    if !parsed.is_empty() {
+                        let rows = parsed.len();
+                        let cols = parsed.get(0).map(|r| r.len()).unwrap_or(0);
+                        ui.colored_label(
+                            Color32::from_rgb(0, 120, 215),
+                            format!("인식된 표 데이터: {}개 행 × {}개 열", rows, cols),
+                        );
+
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(
+                                    RichText::new("현재 셀부터 덮어쓰기")
+                                        .strong()
+                                        .color(Color32::from_rgb(0, 150, 0)),
+                                )
+                                .clicked()
+                            {
+                                let count = apply_paste_overwrite(&mut self.table, 0, 0, &parsed);
+                                self.status_message = format!("{}개 행 덮어쓰기 완료 ({}개 셀 수정)", rows, count);
+                                self.show_smart_paste_modal = false;
+                                self.smart_paste_text.clear();
+                            }
+                            if ui
+                                .button(
+                                    RichText::new("새 행으로 일괄 추가")
+                                        .strong()
+                                        .color(Color32::from_rgb(0, 102, 204)),
+                                )
+                                .clicked()
+                            {
+                                let count = apply_paste_append(&mut self.table, &parsed);
+                                self.status_message = format!("{}개 신규 행 추가 완료", count);
+                                self.show_smart_paste_modal = false;
+                                self.smart_paste_text.clear();
+                            }
+                            if ui.button("내용 지우기").clicked() {
+                                self.smart_paste_text.clear();
+                            }
+                        });
+                    } else {
+                        ui.label(RichText::new("아직 인식된 엑셀 데이터가 없습니다.").weak());
+                    }
+
+                    ui.add_space(10.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
+                        if ui.button("닫기 (Esc)").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                            self.show_smart_paste_modal = false;
+                        }
+                    });
+                });
         }
 
         // Central Table Grid Area
