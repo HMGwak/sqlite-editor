@@ -193,3 +193,34 @@ fn test_06_1000_rows_batch_paste_performance() {
         total_dur
     );
 }
+
+#[test]
+fn test_07_paste_overwrite_with_selection_offset_and_expansion() {
+    let mut table = create_test_table();
+    assert_eq!(table.row_count(), 20);
+
+    // Prepare 5 rows x 2 cols TSV
+    let clip_tsv = "신규이름1\tnew1@corp.com\n신규이름2\tnew2@corp.com\n신규이름3\tnew3@corp.com\n신규이름4\tnew4@corp.com\n신규이름5\tnew5@corp.com";
+    let parsed = parse_tsv(clip_tsv);
+    assert_eq!(parsed.len(), 5);
+
+    // Paste starting at row 18, col 1 (name column)
+    let modified = apply_paste_overwrite(&mut table, 18, 1, &parsed);
+    assert!(modified > 0, "셀 수정이 반영되어야 합니다.");
+
+    // Table should now have 23 rows (18, 19 overwritten; 20, 21, 22 expanded)
+    assert_eq!(table.row_count(), 23, "기존 행 범위를 넘는 붙여넣기는 행을 자동 확장해야 합니다.");
+
+    // Row 18, Col 1 should be "신규이름1"
+    let r18_uid = table.row_uid(VisualRowIdx(18)).unwrap();
+    let c1_uid = table.col_uid(VisualColIdx(1)).unwrap();
+    assert_eq!(table.get((r18_uid, c1_uid).into()).unwrap(), &Variant::Str("신규이름1".into()));
+
+    // Row 22, Col 1 should be "신규이름5"
+    let r22_uid = table.row_uid(VisualRowIdx(22)).unwrap();
+    assert_eq!(table.get((r22_uid, c1_uid).into()).unwrap(), &Variant::Str("신규이름5".into()));
+
+    // Row 0 should be completely untouched
+    let r0_uid = table.row_uid(VisualRowIdx(0)).unwrap();
+    assert_eq!(table.get((r0_uid, c1_uid).into()).unwrap(), &Variant::Str("사용자_1".into()));
+}

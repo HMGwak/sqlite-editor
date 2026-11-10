@@ -319,6 +319,7 @@ impl SqliteEditorApp {
     }
 
     fn paste_from_clipboard_overwrite(&mut self) {
+        let (start_row, start_col) = self.table_view.selected_cell().unwrap_or((0, 0));
         if let Ok(mut cb) = Clipboard::new() {
             if let Ok(text) = cb.get_text() {
                 let parsed = parse_tsv(&text);
@@ -326,19 +327,22 @@ impl SqliteEditorApp {
                     self.status_message = "클립보드에 유효한 테이블 데이터가 없습니다.".to_string();
                     return;
                 }
-                let modified = apply_paste_overwrite(&mut self.table, 0, 0, &parsed);
+                let modified = apply_paste_overwrite(&mut self.table, start_row, start_col, &parsed);
                 self.status_message = format!(
-                    "클립보드에서 {}개 행 덮어쓰기 완료 (수정 셀: {}개)",
+                    "클립보드에서 {}개 행 붙여넣기 완료 ({}행 {}열부터, 수정/추가 셀: {}개)",
                     parsed.len(),
+                    start_row,
+                    start_col,
                     modified
                 );
                 self.last_action_time = Some(Instant::now());
                 return;
             }
         }
-        self.status_message = "클립보드 읽기에 실패했습니다.".to_string();
+        self.status_message = "클립보드 읽기에 실패했습니다. 사내 보안(M365 DLP) 환경인 경우 상단 '스마트 붙여넣기' 버튼 또는 Win + V를 사용하세요.".to_string();
     }
 
+    #[allow(dead_code)]
     fn paste_from_clipboard_append(&mut self) {
         if let Ok(mut cb) = Clipboard::new() {
             if let Ok(text) = cb.get_text() {
@@ -543,7 +547,6 @@ impl eframe::App for SqliteEditorApp {
 
         // Keyboard Shortcuts
         let ctrl_or_cmd = ctx.input(|i| i.modifiers.command || i.modifiers.ctrl);
-        let shift = ctx.input(|i| i.modifiers.shift);
         let wants_keyboard = ctx.egui_wants_keyboard_input();
 
         // F1: Help Dialog Toggle
@@ -611,12 +614,15 @@ impl eframe::App for SqliteEditorApp {
         if !wants_keyboard {
             // Handle OS-level Paste (including Win+V clipboard history selection!)
             if let Some(text) = os_paste_text {
+                let (start_row, start_col) = self.table_view.selected_cell().unwrap_or((0, 0));
                 let parsed = parse_tsv(&text);
                 if !parsed.is_empty() {
-                    let count = apply_paste_overwrite(&mut self.table, 0, 0, &parsed);
+                    let count = apply_paste_overwrite(&mut self.table, start_row, start_col, &parsed);
                     self.status_message = format!(
-                        "클립보드(Win+V)에서 {}개 행 덮어쓰기 완료 ({}개 셀 수정)",
+                        "클립보드(Win+V)에서 {}개 행 붙여넣기 완료 ({}행 {}열부터, {}개 셀 반영)",
                         parsed.len(),
+                        start_row,
+                        start_col,
                         count
                     );
                     self.last_action_time = Some(Instant::now());
@@ -628,13 +634,9 @@ impl eframe::App for SqliteEditorApp {
                 self.copy_table_to_clipboard();
             }
 
-            // Ctrl+V: Paste Overwrite / Ctrl+Shift+V: Paste Append
+            // Ctrl+V and Ctrl+Shift+V: Overwrite Paste (대체해서 붙여넣기)
             if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::V)) {
-                if shift {
-                    self.paste_from_clipboard_append();
-                } else {
-                    self.paste_from_clipboard_overwrite();
-                }
+                self.paste_from_clipboard_overwrite();
             }
 
             // Ctrl+Z: Revert all changes
@@ -734,17 +736,10 @@ impl eframe::App for SqliteEditorApp {
                 }
                 if ui
                     .button(format!("{} 붙여넣기", egui_phosphor::regular::CLIPBOARD))
-                    .on_hover_text("클립보드 내용으로 기존 셀 덮어쓰기 (Ctrl+V)")
+                    .on_hover_text("현재 선택된 셀부터 클립보드 데이터로 대체(덮어쓰기) 붙여넣기 (Ctrl+V, Ctrl+Shift+V)")
                     .clicked()
                 {
                     self.paste_from_clipboard_overwrite();
-                }
-                if ui
-                    .button(format!("{} 신규행 붙여넣기", egui_phosphor::regular::CLIPBOARD_TEXT))
-                    .on_hover_text("클립보드 데이터를 새 행으로 추가 (Ctrl+Shift+V)")
-                    .clicked()
-                {
-                    self.paste_from_clipboard_append();
                 }
                 if ui
                     .button(format!("{} 스마트 붙여넣기", egui_phosphor::regular::CLIPBOARD_TEXT))
@@ -1085,12 +1080,12 @@ impl eframe::App for SqliteEditorApp {
                             ui.label("전체 테이블을 엑셀(TSV) 형식으로 클립보드 복사");
                             ui.end_row();
 
-                            ui.strong("Ctrl + V");
-                            ui.label("클립보드 엑셀 데이터를 현재 셀부터 덮어쓰기");
+                            ui.strong("Ctrl + V / Ctrl + Shift + V");
+                            ui.label("클립보드 엑셀 데이터를 현재 선택된 셀부터 대체(덮어쓰기) 붙여넣기");
                             ui.end_row();
 
-                            ui.strong("Ctrl + Shift + V");
-                            ui.label("클립보드 데이터를 새 행들로 일괄 추가");
+                            ui.strong("Win + V");
+                            ui.label("Windows 클립보드 기록에서 항목 선택 주입 (사내 M365 보안 우회 지원)");
                             ui.end_row();
 
                             ui.strong("더블클릭 / Enter");
@@ -1300,14 +1295,15 @@ impl eframe::App for SqliteEditorApp {
                         ui.horizontal(|ui| {
                             if ui
                                 .button(
-                                    RichText::new("현재 셀부터 덮어쓰기")
+                                    RichText::new("선택 셀부터 대체 붙여넣기")
                                         .strong()
                                         .color(Color32::from_rgb(0, 150, 0)),
                                 )
                                 .clicked()
                             {
-                                let count = apply_paste_overwrite(&mut self.table, 0, 0, &parsed);
-                                self.status_message = format!("{}개 행 덮어쓰기 완료 ({}개 셀 수정)", rows, count);
+                                let (start_row, start_col) = self.table_view.selected_cell().unwrap_or((0, 0));
+                                let count = apply_paste_overwrite(&mut self.table, start_row, start_col, &parsed);
+                                self.status_message = format!("{}개 행 대체 붙여넣기 완료 ({}행 {}열부터, {}개 셀 수정/추가)", rows, start_row, start_col, count);
                                 self.show_smart_paste_modal = false;
                                 self.smart_paste_text.clear();
                             }

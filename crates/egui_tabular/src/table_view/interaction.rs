@@ -85,6 +85,7 @@ impl TableView {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn handle_paste(
         &mut self,
         paste_from_empty: bool,

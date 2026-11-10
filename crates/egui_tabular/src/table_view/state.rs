@@ -8,12 +8,19 @@ pub(super) struct State {
     pub(super) columns: HashMap<ColumnUid, BackendColumn>,
     pub(super) selected_range: Option<SelectedRange>,
 
+    #[allow(dead_code)]
     pub(crate) pasting_block_width: usize,
+    #[allow(dead_code)]
     pub(crate) pasting_block_with_holes: bool,
+    #[allow(dead_code)]
     pub(crate) about_to_paste_rows: Vec<Vec<String>>,
+    #[allow(dead_code)]
     pub(crate) create_rows_on_paste: bool,
+    #[allow(dead_code)]
     pub(crate) fill_with_same_on_paste: bool,
+    #[allow(dead_code)]
     pub(crate) create_cols_on_paste: bool,
+    #[allow(dead_code)]
     pub(crate) create_adhoc_cols_on_paste: bool,
 }
 

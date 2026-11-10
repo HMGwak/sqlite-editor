@@ -29,6 +29,16 @@ impl TableView {
         }
     }
 
+    /// Returns the (visual_row_idx, visual_col_idx) of the top-left cell in the active selection, if any.
+    pub fn selected_cell(&self) -> Option<(usize, usize)> {
+        self.state.selected_range.map(|r| (r.row_start(), r.col_start()))
+    }
+
+    /// Returns the (row_start, row_end, col_start, col_end) of the active selection, if any.
+    pub fn selected_range(&self) -> Option<(usize, usize, usize, usize)> {
+        self.state.selected_range.map(|r| (r.row_start(), r.row_end(), r.col_start(), r.col_end()))
+    }
+
     pub fn show<T: TableFrontend + TableBackend>(
         &mut self,
         table: &mut T,
@@ -41,9 +51,8 @@ impl TableView {
         let prev_selected_range = self.state.selected_range;
         let pointer_over_table = ui.rect_contains_pointer(ui.max_rect());
         let is_read_only = table.persistent_flags().is_read_only;
-        if pointer_over_table && !is_read_only && !self.state.is_editing() {
-            self.handle_paste(is_no_columns, table, ui);
-        }
+        // Note: Clipboard paste is handled at application level with dirty tracking & schema type awareness
+        let _ = (pointer_over_table, is_read_only);
 
         self.check_col_set_updated(table, &mut is_no_columns);
         self.check_row_set_updated(table, config);
