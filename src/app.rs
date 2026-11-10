@@ -329,10 +329,16 @@ impl eframe::App for SqliteEditorApp {
         // Keyboard Shortcuts
         let ctrl_or_cmd = ctx.input(|i| i.modifiers.command || i.modifiers.ctrl);
         let shift = ctx.input(|i| i.modifiers.shift);
+        let wants_keyboard = ctx.egui_wants_keyboard_input();
 
         // F1: Help Dialog Toggle
         if ctx.input(|i| i.key_pressed(Key::F1)) {
             self.show_help_modal = !self.show_help_modal;
+        }
+
+        // F5: Refresh Current Table
+        if ctx.input(|i| i.key_pressed(Key::F5)) {
+            self.refresh_current();
         }
 
         // Ctrl+S / Cmd+S: Save to SQLite
@@ -342,12 +348,45 @@ impl eframe::App for SqliteEditorApp {
             }
         }
 
-        // Ctrl+V: Paste Overwrite / Ctrl+Shift+V: Paste Append
-        if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::V)) {
-            if shift {
-                self.paste_from_clipboard_append();
-            } else {
-                self.paste_from_clipboard_overwrite();
+        // Ctrl+L or Ctrl+O: Open DB File (불러오기)
+        if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::L) || i.key_pressed(Key::O)) {
+            self.open_db_file();
+        }
+
+        // Grid-level shortcuts (active when not directly editing cell text)
+        if !wants_keyboard {
+            // Ctrl+C: Copy Table to Clipboard
+            if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::C)) {
+                self.copy_table_to_clipboard();
+            }
+
+            // Ctrl+V: Paste Overwrite / Ctrl+Shift+V: Paste Append
+            if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::V)) {
+                if shift {
+                    self.paste_from_clipboard_append();
+                } else {
+                    self.paste_from_clipboard_overwrite();
+                }
+            }
+
+            // Ctrl+Z: Revert all changes
+            if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::Z)) {
+                if self.table.tracker.is_dirty() {
+                    self.table.revert_all();
+                    self.status_message = "모든 변경사항이 원복되었습니다 (Ctrl+Z).".to_string();
+                }
+            }
+
+            // Ctrl+N or Insert: Add New Row
+            if (ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::N))) || ctx.input(|i| i.key_pressed(Key::Insert)) {
+                self.table.create_row([]);
+                self.status_message = "새 행이 추가되었습니다 (Ctrl+N).".to_string();
+            }
+
+            // Delete or Ctrl+D: Delete/restore current target row
+            if (ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::D))) || ctx.input(|i| i.key_pressed(Key::Delete)) {
+                let row_idx = self.target_row_idx;
+                self.delete_row_by_index(row_idx);
             }
         }
 
@@ -359,13 +398,13 @@ impl eframe::App for SqliteEditorApp {
                 ui.separator();
 
                 // Group 1: Database File
-                if ui.button("열기").on_hover_text("로컬 SQLite 파일(.db) 선택").clicked() {
+                if ui.button("열기").on_hover_text("로컬 SQLite 파일(.db) 선택 (Ctrl+L, Ctrl+O)").clicked() {
                     self.open_db_file();
                 }
                 if ui.button("샘플 DB").on_hover_text("이커머스 샘플 DB 생성 및 열기").clicked() {
                     self.load_sample_database();
                 }
-                if ui.button("새로고침").on_hover_text("현재 테이블 다시 읽기").clicked() {
+                if ui.button("새로고침").on_hover_text("현재 테이블 다시 읽기 (F5)").clicked() {
                     self.refresh_current();
                 }
 
@@ -385,9 +424,9 @@ impl eframe::App for SqliteEditorApp {
                 ui.separator();
 
                 // Group 3: Row Operations
-                if ui.button("행 추가").on_hover_text("테이블 끝에 새 빈 행 추가").clicked() {
+                if ui.button("행 추가").on_hover_text("테이블 끝에 새 빈 행 추가 (Ctrl+N, Insert)").clicked() {
                     self.table.create_row([]);
-                    self.status_message = "새 행이 추가되었습니다.".to_string();
+                    self.status_message = "새 행이 추가되었습니다 (Ctrl+N).".to_string();
                 }
 
                 let max_row = self.table.row_count().saturating_sub(1);
@@ -399,7 +438,7 @@ impl eframe::App for SqliteEditorApp {
 
                 if ui
                     .button(RichText::new("행 삭제/복원").color(Color32::from_rgb(215, 60, 60)))
-                    .on_hover_text("지정한 행을 삭제/복원 (좌측 행 번호 우클릭으로도 가능)")
+                    .on_hover_text("지정한 행을 삭제/복원 (Delete, Ctrl+D, 또는 행 번호 우클릭)")
                     .clicked()
                 {
                     let row_idx = self.target_row_idx;
@@ -413,11 +452,11 @@ impl eframe::App for SqliteEditorApp {
 
                 if ui
                     .add_enabled(is_dirty, egui::Button::new(RichText::new("되돌리기").color(Color32::from_rgb(180, 70, 70))))
-                    .on_hover_text("모든 수정 내역을 원래대로 되돌림")
+                    .on_hover_text("모든 수정 내역을 원래대로 되돌림 (Ctrl+Z)")
                     .clicked()
                 {
                     self.table.revert_all();
-                    self.status_message = "모든 변경사항이 원복되었습니다.".to_string();
+                    self.status_message = "모든 변경사항이 원복되었습니다 (Ctrl+Z).".to_string();
                 }
 
                 if ui
@@ -434,7 +473,7 @@ impl eframe::App for SqliteEditorApp {
                 ui.separator();
 
                 // Group 5: Help & Utilities
-                if ui.button("도움말 (F1)").on_hover_text("단축키 및 상세 가이드").clicked() {
+                if ui.button("도움말 (F1)").on_hover_text("단축키 및 상세 가이드 (F1)").clicked() {
                     self.show_help_modal = true;
                 }
 
@@ -544,16 +583,40 @@ impl eframe::App for SqliteEditorApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui.ctx(), |ui| {
-                    ui.set_width(460.0);
+                    ui.set_width(520.0);
                     ui.heading("단축키 안내");
                     ui.add_space(4.0);
                     egui::Grid::new("help_shortcuts_grid")
                         .striped(true)
                         .num_columns(2)
-                        .spacing([24.0, 8.0])
+                        .spacing([24.0, 6.0])
                         .show(ui, |ui| {
                             ui.strong("Ctrl + S");
                             ui.label("데이터베이스에 안전하게 영구 저장 (자동 백업 생성)");
+                            ui.end_row();
+
+                            ui.strong("Ctrl + L / Ctrl + O");
+                            ui.label("로컬 SQLite DB 파일 열기 (불러오기)");
+                            ui.end_row();
+
+                            ui.strong("F5");
+                            ui.label("현재 테이블 새로고침 (DB 최신 데이터 재조회)");
+                            ui.end_row();
+
+                            ui.strong("Ctrl + Z");
+                            ui.label("저장 전 모든 수정/추가/삭제를 원래대로 원복");
+                            ui.end_row();
+
+                            ui.strong("Ctrl + N / Insert");
+                            ui.label("테이블 끝에 새 빈 행 추가");
+                            ui.end_row();
+
+                            ui.strong("Ctrl + D / Delete");
+                            ui.label("지정한 행 삭제 예정(취소선) 표시 또는 복원");
+                            ui.end_row();
+
+                            ui.strong("Ctrl + C");
+                            ui.label("전체 테이블을 엑셀(TSV) 형식으로 클립보드 복사");
                             ui.end_row();
 
                             ui.strong("Ctrl + V");
@@ -561,11 +624,7 @@ impl eframe::App for SqliteEditorApp {
                             ui.end_row();
 
                             ui.strong("Ctrl + Shift + V");
-                            ui.label("클립보드 데이터를 새 행으로 일괄 추가");
-                            ui.end_row();
-
-                            ui.strong("Ctrl + C");
-                            ui.label("전체 테이블을 엑셀(TSV) 형식으로 클립보드에 복사");
+                            ui.label("클립보드 데이터를 새 행들로 일괄 추가");
                             ui.end_row();
 
                             ui.strong("더블클릭 / Enter");
@@ -580,8 +639,12 @@ impl eframe::App for SqliteEditorApp {
                             ui.label("셀 편집 취소 또는 팝업 창 닫기");
                             ui.end_row();
 
+                            ui.strong("F1");
+                            ui.label("도움말 팝업 열기 / 닫기");
+                            ui.end_row();
+
                             ui.strong("행 번호 우클릭");
-                            ui.label("해당 행 삭제/복원 ('Skip row' 체크 시 취소선 표시)");
+                            ui.label("해당 행 삭제/복원 ('Skip row' 체크)");
                             ui.end_row();
                         });
 
@@ -590,8 +653,8 @@ impl eframe::App for SqliteEditorApp {
                     ui.heading("안전 저장 및 백업 원칙");
                     ui.add_space(4.0);
                     ui.label("• 셀을 수정하거나 행을 추가/삭제해도 즉시 파일에 쓰이지 않습니다.");
-                    ui.label("• '저장(Ctrl+S)'을 누르면 원본 DB가 자동으로 백업(*.bak)된 후 반영됩니다.");
-                    ui.label("• 저장 전 언제든 '되돌리기' 버튼으로 모든 변경사항을 원복할 수 있습니다.");
+                    ui.label("• '저장(Ctrl+S)'을 누르면 원본 DB가 자동으로 백업(*.bak)된 후 안전하게 반영됩니다.");
+                    ui.label("• 저장 전 언제든 '되돌리기(Ctrl+Z)'로 모든 변경사항을 원복할 수 있습니다.");
 
                     ui.add_space(14.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
