@@ -955,6 +955,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-phosphor"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f4299551488dddaa8f757727e1eb4ffdaf277ffe6e30b413403468f5ecf4634"
+dependencies = [
+ "egui",
+]
+
+[[package]]
 name = "egui-wgpu"
 version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1029,8 +1038,6 @@ dependencies = [
 [[package]]
 name = "egui_tabular"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1951491a6f6d98baa592ffb2a8f5cb7af319cf878407b35d7d413c8349dc34f"
 dependencies = [
  "chardetng",
  "csv",
@@ -3487,6 +3494,7 @@ dependencies = [
  "arboard",
  "eframe",
  "egui",
+ "egui-phosphor",
  "egui_tabular",
  "rfd 0.15.4",
  "rusqlite",
@@ -3595,8 +3603,6 @@ dependencies = [
 [[package]]
 name = "tabular_core"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d290d4dde32191e87b08454296d135c1fe6f9498ad93f1b9ee61ebf1c2c866c"
 dependencies = [
  "rvariant",
  "serde",

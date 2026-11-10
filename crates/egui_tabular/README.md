@@ -1,0 +1,77 @@
+# Customizable egui table viewer and editor.
+
+![Crates.io Version](https://img.shields.io/crates/v/egui_tabular)
+
+<img align="right" src="https://github.com/romixlab/egui_tabular/blob/main/assets/simple_demo.png?raw=true" alt="logo"/>
+
+Fast and responsive table viewer and editor, that only shows visible rows. Data backend is fully generic,
+allowing implementations based on vectors, files, databases and other data structures.
+
+TODO: Add web demo.
+
+## Features
+
+* [x] Cells UI and table information is provided through the [TableBackend](src/backend.rs) trait.
+* [x] Custom cell viewer and editor ui, any egui or user widgets can be used.
+* [x] Built-in cell viewers and editors through [VariantBackend](src/backends/variant.rs):
+    * [x] String, string list, numbers, booleans, custom enums
+    * [ ] Date, SI values, currency
+* [x] Data import with automatic column mapping based on names.
+    * [x] CSV support.
+    * [ ] XLS support.
+* [x] Manual column mapping to one of the choices provided by the backend (combo box above columns).
+* [ ] Undo / Redo support.
+* [x] No need to keep all data in memory (if backend supports it).
+* [ ] Support for sorting.
+* [ ] Support for filtering based on custom user ui from the TableBackend trait.
+* [x] Keyboard shortcuts and navigation.
+* [x] Copy-paste support for cells and blocks of cells.
+* [x] Ability to add lints to cells and change their background color.
+    * [ ] Add icons
+* [x] Support for cells with varying heights.
+* [x] Drag&drop column reordering.
+* [x] Export to CSV.
+* [ ] Stick to bottom mode for viewing real time data.
+* [x] Visual state can be persisted on disk.
+* [x] Disable/enable rows and columns (show a hatch pattern when disabled).
+* [x] Change a column type and try to turn data into requested type (VariantBackend, only from code now).
+* [x] Derive macro to show Vec<UserRowStruct> as table.
+* [ ] Improve drag&drop, like on DK + preserve widths
+
+## Non-goals
+
+* Become Excel or G.Sheets replacement.
+
+## Potential features
+
+* Export to XLS / XLSX
+
+## Keyboard shortcuts
+
+* Ctrl+V - paste block
+* Ctrl+C - copy block
+* Ctrl+A - select all (when not editing)
+* Tab - commit edit and edit cell to the right
+* E - edit cell
+* Esc - cancel edit or unselect
+* Left, Right, Up, Down - move selection
+    * +Shift - expand selection
+* N - append new row
+* Shift + click - expand selection
+
+## Project status
+
+Experimental — many of the essential features are implemented, but documentation is incomplete and examples are absent.
+
+## Alternatives
+
+This project borrows some ideas from the great [egui-data-table](https://github.com/kang-sw/egui-data-table).
+Check it out if you don't need CSV/XLS import with column mapping or want to show some data based on a vector.
+The idea behind TableBackend trait in this crate is to allow more advanced data retrieval, for example from a database.
+
+## Compatible version with egui
+
+Version | egui
+--- | ---
+0.1 | 0.33
+0.2 | 0.36

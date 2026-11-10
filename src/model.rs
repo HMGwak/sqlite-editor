@@ -110,6 +110,8 @@ pub struct TrackedTableBackend {
     pub column_names: Vec<String>,
     pub schema: Option<TableSchema>,
     pub custom_columns: HashMap<ColumnUid, BackendColumn>,
+    pub search_matches: HashSet<CellCoord>,
+    pub current_search_focus: Option<CellCoord>,
 }
 
 impl TrackedTableBackend {
@@ -121,7 +123,7 @@ impl TrackedTableBackend {
             custom_columns.insert(col_uid, BackendColumn {
                 name: n.to_string(),
                 synonyms: vec![],
-                ty: String::new(), // Empty type string so no redundant 2nd row is rendered
+                ty: String::new(),
                 is_sortable: true,
                 is_required: false,
                 is_used: true,
@@ -136,6 +138,8 @@ impl TrackedTableBackend {
             column_names: names,
             schema: None,
             custom_columns,
+            search_matches: HashSet::new(),
+            current_search_focus: None,
         }
     }
 
@@ -147,6 +151,8 @@ impl TrackedTableBackend {
             column_names: Vec::new(),
             schema: None,
             custom_columns: HashMap::new(),
+            search_matches: HashSet::new(),
+            current_search_focus: None,
         };
         backend.load_db_table(schema, rows);
         backend
@@ -157,6 +163,8 @@ impl TrackedTableBackend {
         self.inner.remove_all_columns();
         self.column_names.clear();
         self.custom_columns.clear();
+        self.search_matches.clear();
+        self.current_search_focus = None;
 
         for (idx, col) in schema.columns.iter().enumerate() {
             // Clean column header: [PK] name if primary key, otherwise just name
@@ -164,6 +172,19 @@ impl TrackedTableBackend {
                 format!("[PK] {}", col.name)
             } else {
                 col.name.clone()
+            };
+
+            // SQLite Data Type & Constraints (Line 2 below column name)
+            let type_desc = if col.is_pk {
+                if col.not_null {
+                    format!("{} • PK • NOT NULL", col.data_type)
+                } else {
+                    format!("{} • PK", col.data_type)
+                }
+            } else if col.not_null {
+                format!("{} • NOT NULL", col.data_type)
+            } else {
+                col.data_type.clone()
             };
 
             self.column_names.push(display_name.clone());
@@ -179,13 +200,13 @@ impl TrackedTableBackend {
                 true,
             );
 
-            // Override BackendColumn with empty `ty` to prevent duplicate "String" line in header
+            // BackendColumn with column name on Line 1, and exact SQLite schema on Line 2
             self.custom_columns.insert(
                 col_uid,
                 BackendColumn {
                     name: display_name,
                     synonyms: vec![col.data_type.clone()],
-                    ty: String::new(), // Clean single-line header!
+                    ty: type_desc,
                     is_sortable: true,
                     is_required: col.not_null,
                     is_used: true,
@@ -305,6 +326,12 @@ impl TableBackend for TrackedTableBackend {
         self.inner.clear();
         self.tracker.clear();
         self.custom_columns.clear();
+        self.search_matches.clear();
+        self.current_search_focus = None;
+    }
+
+    fn sort_by_col(&mut self, col_uid: ColumnUid, ascending: bool) {
+        self.inner.sort_by_column(col_uid, ascending);
     }
 
     fn is_clearable(&self) -> bool {
@@ -503,7 +530,11 @@ impl TableFrontend for TrackedTableBackend {
     }
 
     fn cell_color(&self, coord: CellCoord) -> Option<Color32> {
-        if self.tracker.is_row_deleted(coord.row_uid) {
+        if self.current_search_focus == Some(coord) {
+            Some(Color32::from_rgb(255, 213, 79)) // Vibrant amber for focused search match
+        } else if self.search_matches.contains(&coord) {
+            Some(Color32::from_rgb(255, 249, 196)) // Soft yellow for all search matches
+        } else if self.tracker.is_row_deleted(coord.row_uid) {
             Some(Color32::from_rgb(255, 230, 230)) // Soft light red for deleted row
         } else if self.tracker.is_cell_dirty(&coord) {
             Some(Color32::from_rgb(255, 243, 205)) // Warm amber for modified cell

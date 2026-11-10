@@ -13,3 +13,8 @@ rvariant = "0.2.0"
 rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 rfd = "0.15" # For native file dialogs (open sqlite file)
 arboard = "3.4" # Clipboard access if needed
+egui-phosphor = "0.14.0"
+
+[patch.crates-io]
+egui_tabular = { path = "crates/egui_tabular" }
+tabular_core = { path = "crates/tabular_core" }
