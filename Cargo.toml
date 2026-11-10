@@ -1,0 +1,15 @@
+[package]
+name = "sqlite-editor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.36"
+egui = "0.36"
+egui_tabular = "0.2.0"
+tabular_core = "0.2.0"
+tabular_derive = "0.2.0"
+rvariant = "0.2.0"
+rusqlite = { version = "0.38", features = ["bundled"] }
+rfd = "0.15" # For native file dialogs (open sqlite file)
+arboard = "3.4" # Clipboard access if needed
