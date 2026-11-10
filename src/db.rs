@@ -305,6 +305,23 @@ impl DbService {
         Ok((column_names, data))
     }
 
+    /// Run SQLite VACUUM to reclaim free space, defragment, and shrink the database file.
+    /// Returns (file_size_before_bytes, file_size_after_bytes).
+    pub fn compact_database(&self) -> Result<(u64, u64), Box<dyn std::error::Error>> {
+        let conn = self.conn.as_ref().ok_or("열린 데이터베이스가 없습니다.")?;
+        let path = self.db_path.as_ref().ok_or("데이터베이스 파일 경로가 없습니다.")?;
+
+        // Checkpoint WAL so any pending changes are flushed into the main database file
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        let before_size = std::fs::metadata(path)?.len();
+
+        conn.execute_batch("VACUUM;")?;
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        let after_size = std::fs::metadata(path)?.len();
+
+        Ok((before_size, after_size))
+    }
+
     /// Atomically save in-memory modifications (updates, inserts, deletes) into SQLite.
     /// Creates an online backup prior to mutating the database.
     pub fn save_changes(

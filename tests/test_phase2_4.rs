@@ -158,3 +158,33 @@ fn test_p24_03_transaction_rollback_on_failure() {
 
     let _ = fs::remove_file(db_path);
 }
+
+#[test]
+fn test_p24_04_compact_database_vacuum() {
+    let db_path = setup_temp_db("04");
+    let mut db = DbService::new();
+    db.open(&db_path).unwrap();
+
+    // Insert dummy table with 500 rows then drop/delete to create free pages
+    {
+        let conn = db.conn.as_ref().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE temp_bloat (id INTEGER PRIMARY KEY, big_text TEXT);
+             BEGIN TRANSACTION;
+            "
+        ).unwrap();
+        for i in 0..500 {
+            conn.execute("INSERT INTO temp_bloat VALUES (?1, zeroblob(4096));", [i]).unwrap();
+        }
+        conn.execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE); DROP TABLE temp_bloat; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    }
+
+    // Call compact_database (VACUUM)
+    let (before_bytes, after_bytes) = db.compact_database().unwrap();
+    println!("Database compaction (VACUUM): {before_bytes} bytes -> {after_bytes} bytes");
+
+    assert!(before_bytes > after_bytes, "VACUUM 후 파일 용량이 줄어들어야 합니다.");
+    assert!(after_bytes > 0, "유효한 DB 파일 크기가 유지되어야 합니다.");
+
+    let _ = fs::remove_file(db_path);
+}
