@@ -1,4 +1,4 @@
-name: Build Binaries
+name: Build Windows EXE
 
 on:
   push:
@@ -35,32 +35,5 @@ jobs:
         with:
           name: sqlite-editor-windows-x86_64
           path: target/release/sqlite-editor.exe
-          if-no-files-found: error
-          retention-days: 30
-
-  build-macos:
-    name: Build macOS Binary
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run tests
-        run: cargo test --verbose
-
-      - name: Build release binary
-        run: cargo build --release
-
-      - name: Upload macOS Binary Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sqlite-editor-macos-arm64
-          path: target/release/sqlite-editor
           if-no-files-found: error
           retention-days: 30
