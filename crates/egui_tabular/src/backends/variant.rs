@@ -210,6 +210,7 @@ impl VariantBackend {
 
     pub fn set_read_only(&mut self, read_only: bool) {
         self.read_only = read_only;
+        self.persistent_flags.is_read_only = read_only;
     }
 
     pub fn sort_by_column(&mut self, col_uid: ColumnUid, ascending: bool) {

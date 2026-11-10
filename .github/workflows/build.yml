@@ -3,6 +3,7 @@ name: Build Windows EXE
 on:
   push:
     branches: [ "main", "master" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
@@ -37,3 +38,10 @@ jobs:
           path: target/release/sqlite-editor.exe
           if-no-files-found: error
           retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: target/release/sqlite-editor.exe
+          generate_release_notes: true

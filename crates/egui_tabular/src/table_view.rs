@@ -554,6 +554,14 @@ impl TableView {
                         let _resp = table.show_cell_editor(coord, ui, id);
                         if ui.input(|i| i.key_pressed(Key::Enter)) {
                             commit_edit = Some(coord);
+                            if let Some(r) = &mut s.selected_range {
+                                r.set_editing(None);
+                                if ctx.input(|i| i.modifiers.shift) {
+                                    r.move_up(false);
+                                } else {
+                                    r.move_down(false, table.row_count());
+                                }
+                            }
                         }
                         if ui.input(|i| i.key_pressed(Key::Escape)) {
                             if let Some(r) = &mut s.selected_range {

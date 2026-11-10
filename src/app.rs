@@ -8,7 +8,7 @@ use egui_tabular::{TableBackend, TableView};
 use rvariant::{Variant, VariantTy};
 use std::path::PathBuf;
 use std::time::Instant;
-use tabular_core::backend::VisualRowIdx;
+use tabular_core::backend::{VisualColIdx, VisualRowIdx};
 use tabular_core::{CellCoord, ColumnUid};
 
 pub struct QueryWindowState {
@@ -68,6 +68,9 @@ pub struct SqliteEditorApp {
     // Smart Paste / Win+V Clipboard History Support Modal
     pub show_smart_paste_modal: bool,
     pub smart_paste_text: String,
+
+    // Database Lock / Read-Only Mode
+    pub is_locked: bool,
 }
 
 pub fn setup_korean_fonts(ctx: &egui::Context) {
@@ -135,12 +138,83 @@ fn case_insensitive_replace(text: &str, query: &str, replacement: &str) -> Strin
     result
 }
 
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn ribbon_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    tooltip: &str,
+    highlight_color: Option<Color32>,
+    bg_override: Option<Color32>,
+) -> egui::Response {
+    let desired_size = egui::vec2(58.0, 46.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&response);
+        let bg_fill = if let Some(bg) = bg_override {
+            if response.hovered() {
+                bg
+            } else {
+                bg.gamma_multiply(0.6)
+            }
+        } else if response.hovered() {
+            ui.visuals().widgets.hovered.bg_fill
+        } else {
+            Color32::TRANSPARENT
+        };
+
+        let stroke = if let Some(c) = highlight_color {
+            egui::Stroke::new(1.0, c)
+        } else if response.hovered() {
+            ui.visuals().widgets.hovered.bg_stroke
+        } else {
+            egui::Stroke::NONE
+        };
+
+        ui.painter().rect(rect, 4.0, bg_fill, stroke, egui::StrokeKind::Inside);
+
+        let icon_color = highlight_color.unwrap_or_else(|| visuals.text_color());
+        let icon_galley = ui.painter().layout_no_wrap(
+            icon.to_string(),
+            egui::FontId::proportional(20.0),
+            icon_color,
+        );
+        let icon_pos = egui::pos2(
+            rect.center().x - icon_galley.size().x / 2.0,
+            rect.top() + 4.0,
+        );
+        ui.painter().galley(icon_pos, icon_galley, icon_color);
+
+        let text_color = highlight_color.unwrap_or_else(|| visuals.text_color());
+        let label_galley = ui.painter().layout_no_wrap(
+            label.to_string(),
+            egui::FontId::proportional(11.0),
+            text_color,
+        );
+        let label_pos = egui::pos2(
+            rect.center().x - label_galley.size().x / 2.0,
+            rect.bottom() - label_galley.size().y - 3.0,
+        );
+        ui.painter().galley(label_pos, label_galley, text_color);
+    }
+    response.on_hover_text(tooltip)
+}
+
 impl SqliteEditorApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Setup Korean fonts for crisp CJK glyph rendering and Phosphor icons
         setup_korean_fonts(&cc.egui_ctx);
 
-        let mut app = Self {
+        let app = Self {
             db_service: DbService::new(),
             table_summaries: Vec::new(),
             selected_table: None,
@@ -169,10 +243,9 @@ impl SqliteEditorApp {
             query_window: QueryWindowState::default(),
             show_smart_paste_modal: false,
             smart_paste_text: String::new(),
+            is_locked: false,
         };
 
-        // Automatically load initial sample database for immediate exploration
-        app.load_sample_database();
         app
     }
 
@@ -306,6 +379,7 @@ impl SqliteEditorApp {
         self.last_action_time = Some(Instant::now());
     }
 
+    #[allow(dead_code)]
     pub fn delete_row_by_index(&mut self, row_idx: usize) {
         if let Some(row_uid) = self.table.row_uid(VisualRowIdx(row_idx)) {
             if self.table.tracker.is_row_deleted(row_uid) {
@@ -318,7 +392,107 @@ impl SqliteEditorApp {
         }
     }
 
+    pub fn toggle_lock(&mut self) {
+        self.is_locked = !self.is_locked;
+        self.table.set_read_only(self.is_locked);
+        if self.is_locked {
+            self.status_message = "잠금 상태 활성화: 읽기 전용으로 보호됩니다 (편집 불가).".to_string();
+        } else {
+            self.status_message = "잠금 해제: 편집 및 수정이 가능합니다.".to_string();
+        }
+        self.last_action_time = Some(Instant::now());
+    }
+
+    pub fn compact_database(&mut self) {
+        if self.is_locked {
+            self.status_message = "잠금 상태입니다. 잠금을 해제한 후 압축을 실행하세요.".to_string();
+            return;
+        }
+        if self.table.tracker.is_dirty() {
+            self.save_to_sqlite();
+        }
+        match self.db_service.compact_database() {
+            Ok((before, after)) => {
+                let saved = before.saturating_sub(after);
+                let pct = if before > 0 {
+                    (saved as f64 / before as f64) * 100.0
+                } else {
+                    0.0
+                };
+                self.status_message = format!(
+                    "데이터베이스 압축(VACUUM) 완료: {} -> {} ({:.1}% 절감)",
+                    format_bytes(before),
+                    format_bytes(after),
+                    pct
+                );
+                self.last_action_time = Some(Instant::now());
+            }
+            Err(e) => {
+                self.status_message = format!("데이터베이스 압축 실패: {e}");
+            }
+        }
+    }
+
+    pub fn copy_table_schema_to_clipboard(&mut self) {
+        let Some(table_name) = &self.selected_table else {
+            self.status_message = "선택된 테이블이 없습니다.".to_string();
+            return;
+        };
+        let row_count = self.table.row_count();
+        let col_count = self.table.column_names.len();
+        let col_list = self.table.column_names.join(", ");
+
+        let mut lines = Vec::new();
+        lines.push(format!("### SQLite Table: `{table_name}`"));
+        lines.push(format!("- Dimensions: {col_count} columns × {row_count} rows"));
+        lines.push(format!("- Columns ({col_count}):"));
+
+        let pk_names: Vec<String> = self.table.schema.as_ref()
+            .map(|s| s.primary_keys.clone())
+            .unwrap_or_default();
+
+        for col_name in &self.table.column_names {
+            let is_pk = pk_names.contains(col_name);
+            let col_ty = self.table.schema.as_ref()
+                .and_then(|s| s.columns.iter().find(|c| c.name == *col_name))
+                .map(|c| c.data_type.clone())
+                .unwrap_or_else(|| "TEXT".to_string());
+            let not_null = self.table.schema.as_ref()
+                .and_then(|s| s.columns.iter().find(|c| c.name == *col_name))
+                .map(|c| c.not_null)
+                .unwrap_or(false);
+
+            let mut flags = Vec::new();
+            if is_pk { flags.push("PRIMARY KEY"); }
+            if not_null { flags.push("NOT NULL"); }
+
+            let flag_str = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", flags.join(", "))
+            };
+
+            lines.push(format!("  - `{col_name}`: {col_ty}{flag_str}"));
+        }
+
+        lines.push(format!("- Column List (Comma-separated):\n  {col_list}"));
+
+        let markdown = lines.join("\n");
+        if let Ok(mut cb) = Clipboard::new() {
+            if cb.set_text(markdown).is_ok() {
+                self.status_message = format!("테이블 '{}' 스키마 정보가 AI 프롬프트용으로 복사되었습니다.", table_name);
+                self.last_action_time = Some(Instant::now());
+                return;
+            }
+        }
+        self.status_message = "클립보드 복사에 실패했습니다.".to_string();
+    }
+
     fn paste_from_clipboard_overwrite(&mut self) {
+        if self.is_locked {
+            self.status_message = "잠금 상태(읽기 전용)이므로 붙여넣기를 할 수 없습니다. 상단 '잠금' 버튼을 클릭하여 해제하세요.".to_string();
+            return;
+        }
         let (start_row, start_col) = self.table_view.selected_cell().unwrap_or((0, 0));
         if let Ok(mut cb) = Clipboard::new() {
             if let Ok(text) = cb.get_text() {
@@ -653,201 +827,241 @@ impl eframe::App for SqliteEditorApp {
                 self.status_message = "새 행이 추가되었습니다 (Ctrl+N).".to_string();
             }
 
-            // Delete or Ctrl+D: Delete/restore current target row
-            if (ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::D))) || ctx.input(|i| i.key_pressed(Key::Delete)) {
-                let row_idx = self.target_row_idx;
-                self.delete_row_by_index(row_idx);
+            // Delete: Clear selected cells, or if entire rows selected, mark rows deleted
+            if ctx.input(|i| i.key_pressed(Key::Delete)) {
+                if self.is_locked {
+                    self.status_message = "잠금 상태(읽기 전용)입니다. 상단 '잠금' 버튼을 클릭하여 해제하세요.".to_string();
+                } else if let Some((r_start, r_end, c_start, c_end)) = self.table_view.selected_range() {
+                    let total_cols = self.table.column_names.len();
+                    if c_start == 0 && c_end >= total_cols.saturating_sub(1) {
+                        for r_idx in r_start..=r_end {
+                            if let Some(row_uid) = self.table.row_uid(VisualRowIdx(r_idx)) {
+                                self.table.mark_row_deleted(row_uid);
+                            }
+                        }
+                        self.status_message = format!("선택한 {}개 행이 삭제 예정으로 표시되었습니다.", r_end - r_start + 1);
+                    } else {
+                        let mut cleared = 0;
+                        for r_idx in r_start..=r_end {
+                            let Some(row_uid) = self.table.row_uid(VisualRowIdx(r_idx)) else { continue };
+                            for c_idx in c_start..=c_end {
+                                let Some(col_uid) = self.table.col_uid(VisualColIdx(c_idx)) else { continue };
+                                let coord: CellCoord = (row_uid, col_uid).into();
+                                self.table.set(coord, Variant::Empty);
+                                cleared += 1;
+                            }
+                        }
+                        self.status_message = format!("선택한 {}개 셀의 내용이 지워졌습니다.", cleared);
+                    }
+                    self.last_action_time = Some(Instant::now());
+                }
+            }
+
+            // Ctrl+D: Delete/restore selected row(s)
+            if ctrl_or_cmd && ctx.input(|i| i.key_pressed(Key::D)) {
+                if self.is_locked {
+                    self.status_message = "잠금 상태(읽기 전용)입니다. 상단 '잠금' 버튼을 클릭하여 해제하세요.".to_string();
+                } else if let Some((r_start, r_end, _, _)) = self.table_view.selected_range() {
+                    for r_idx in r_start..=r_end {
+                        if let Some(row_uid) = self.table.row_uid(VisualRowIdx(r_idx)) {
+                            if self.table.tracker.is_row_deleted(row_uid) {
+                                self.table.unmark_row_deleted(row_uid);
+                            } else {
+                                self.table.mark_row_deleted(row_uid);
+                            }
+                        }
+                    }
+                    self.status_message = format!("선택한 행(#{}~#{}) 삭제/복원 토글 완료", r_start, r_end);
+                    self.last_action_time = Some(Instant::now());
+                }
             }
         }
 
-        // Top Control Panel (Refined modern toolbar with crisp Phosphor icons)
-        Panel::top("top_toolbar").show(ui, |ui| {
-            ui.add_space(5.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.strong(RichText::new("SQLite Editor").size(15.0));
-                ui.separator();
+        // Dynamic Window Title Bar update
+        let window_title = match (&self.db_service.file_name(), &self.selected_table) {
+            (Some(db), Some(tbl)) => {
+                let cols = self.table.column_names.len();
+                let rows = self.table.row_count();
+                format!("{} : {} ({} cols × {} rows) — SQLite Editor", db, tbl, cols, rows)
+            }
+            (Some(db), None) => format!("{} — SQLite Editor", db),
+            (None, _) => "SQLite Editor".to_string(),
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title));
 
-                // Group 1: Database File
-                if ui
-                    .button(format!("{} 열기", egui_phosphor::regular::FOLDER_OPEN))
-                    .on_hover_text("로컬 SQLite DB 파일(.db) 선택 (Ctrl+L, Ctrl+O)")
-                    .clicked()
+        // Top Ribbon Toolbar (Modern clean single-row Ribbon design)
+        Panel::top("top_toolbar").show(ui, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                // Open DB
+                if ribbon_button(
+                    ui,
+                    egui_phosphor::regular::FOLDER_OPEN,
+                    "열기",
+                    "로컬 SQLite DB 파일 열기 (Ctrl+O, Ctrl+L)",
+                    None,
+                    None,
+                )
+                .clicked()
                 {
                     self.open_db_file();
                 }
-                if ui
-                    .button(format!("{} 샘플 DB", egui_phosphor::regular::DATABASE))
-                    .on_hover_text("이커머스 샘플 SQLite DB 생성 및 열기")
-                    .clicked()
-                {
-                    self.load_sample_database();
-                }
-                if ui
-                    .button(format!("{} 새로고침", egui_phosphor::regular::ARROWS_CLOCKWISE))
-                    .on_hover_text("현재 테이블 다시 조회 (F5)")
-                    .clicked()
-                {
-                    self.refresh_current();
-                }
 
-                ui.separator();
-
-                // Group 2: Save & Revert
+                // Save
                 let is_dirty = self.table.tracker.is_dirty();
-                if ui
-                    .add_enabled(
-                        is_dirty,
-                        egui::Button::new(
-                            RichText::new(format!("{} 저장", egui_phosphor::regular::FLOPPY_DISK))
-                                .strong()
-                                .color(Color32::from_rgb(34, 139, 34)),
-                        ),
-                    )
-                    .on_hover_text("자동 백업(*.bak) 생성 후 안전하게 영구 저장 (Ctrl+S)")
-                    .clicked()
+                let save_color = if is_dirty {
+                    Some(Color32::from_rgb(34, 139, 34))
+                } else {
+                    None
+                };
+                let save_bg = if is_dirty {
+                    Some(Color32::from_rgb(240, 253, 244))
+                } else {
+                    None
+                };
+                if ribbon_button(
+                    ui,
+                    egui_phosphor::regular::FLOPPY_DISK,
+                    "저장",
+                    "데이터베이스에 안전하게 영구 저장 (Ctrl+S)",
+                    save_color,
+                    save_bg,
+                )
+                .clicked()
                 {
                     self.save_to_sqlite();
                 }
 
-                if ui
-                    .add_enabled(
-                        is_dirty,
-                        egui::Button::new(
-                            RichText::new(format!("{} 되돌리기", egui_phosphor::regular::ARROW_U_UP_LEFT))
-                                .color(Color32::from_rgb(180, 70, 70)),
-                        ),
-                    )
-                    .on_hover_text("저장 전 모든 수정 내역을 원래대로 되돌림 (Ctrl+Z)")
-                    .clicked()
+                // Refresh
+                if ribbon_button(
+                    ui,
+                    egui_phosphor::regular::ARROWS_CLOCKWISE,
+                    "새로고침",
+                    "현재 테이블 데이터 다시 조회 (F5)",
+                    None,
+                    None,
+                )
+                .clicked()
                 {
-                    self.table.revert_all();
-                    self.status_message = "모든 변경사항이 원복되었습니다 (Ctrl+Z).".to_string();
+                    self.refresh_current();
+                }
+
+                // Compact (VACUUM)
+                if ribbon_button(
+                    ui,
+                    egui_phosphor::regular::ARROWS_IN,
+                    "압축",
+                    "미사용 공간 회수 및 DB 파일 크기 최적화 압축 (SQLite VACUUM)",
+                    None,
+                    None,
+                )
+                .clicked()
+                {
+                    self.compact_database();
                 }
 
                 ui.separator();
 
-                // Group 3: Clipboard
-                if ui
-                    .button(format!("{} 복사", egui_phosphor::regular::COPY))
-                    .on_hover_text("전체 테이블을 엑셀(TSV)로 클립보드 복사 (Ctrl+C)")
-                    .clicked()
-                {
-                    self.copy_table_to_clipboard();
-                }
-                if ui
-                    .button(format!("{} 붙여넣기", egui_phosphor::regular::CLIPBOARD))
-                    .on_hover_text("현재 선택된 셀부터 클립보드 데이터로 대체(덮어쓰기) 붙여넣기 (Ctrl+V, Ctrl+Shift+V)")
-                    .clicked()
-                {
-                    self.paste_from_clipboard_overwrite();
-                }
-                if ui
-                    .button(format!("{} 스마트 붙여넣기", egui_phosphor::regular::CLIPBOARD_TEXT))
-                    .on_hover_text("사내 보안(M365 DLP) 환경에서 Win+V 클립보드 히스토리 직접 주입 창 열기")
-                    .clicked()
-                {
-                    self.show_smart_paste_modal = true;
+                // Lock Toggle (Read-only protection)
+                let (lock_icon, lock_label, lock_color, lock_bg) = if self.is_locked {
+                    (
+                        egui_phosphor::regular::LOCK_SIMPLE,
+                        "잠금",
+                        Some(Color32::from_rgb(217, 119, 6)),
+                        Some(Color32::from_rgb(254, 243, 199)),
+                    )
+                } else {
+                    (
+                        egui_phosphor::regular::LOCK_SIMPLE_OPEN,
+                        "편집",
+                        None,
+                        None,
+                    )
+                };
+                let lock_tip = if self.is_locked {
+                    "현재 읽기 전용으로 보호 중 (실수 수정 방지). 클릭 시 편집 모드로 전환"
+                } else {
+                    "현재 편집 가능 모드. 클릭 시 읽기 전용으로 잠금"
+                };
+                if ribbon_button(ui, lock_icon, lock_label, lock_tip, lock_color, lock_bg).clicked() {
+                    self.toggle_lock();
                 }
 
                 ui.separator();
 
-                // Group 4: Row Operations
-                if ui
-                    .button(format!("{} 행 추가", egui_phosphor::regular::PLUS))
-                    .on_hover_text("테이블 끝에 새 빈 행 추가 (Ctrl+N, Insert)")
-                    .clicked()
-                {
-                    self.table.create_row([]);
-                    self.status_message = "새 행이 추가되었습니다 (Ctrl+N).".to_string();
-                }
-
-                let max_row = self.table.row_count().saturating_sub(1);
-                ui.add(
-                    egui::DragValue::new(&mut self.target_row_idx)
-                        .range(0..=max_row)
-                        .prefix("행 #"),
-                );
-
-                if ui
-                    .button(
-                        RichText::new(format!("{} 행 삭제/복원", egui_phosphor::regular::TRASH))
-                            .color(Color32::from_rgb(215, 60, 60)),
-                    )
-                    .on_hover_text("지정한 행 삭제/복원 (Delete, Ctrl+D, 또는 행 번호 우클릭)")
-                    .clicked()
-                {
-                    let row_idx = self.target_row_idx;
-                    self.delete_row_by_index(row_idx);
-                }
-
-                ui.separator();
-
-                // Group 5: Search & Replace
-                let search_active = self.show_search_bar && !self.search_replace_mode;
-                if ui
-                    .selectable_label(
-                        search_active,
-                        format!("{} 찾기", egui_phosphor::regular::MAGNIFYING_GLASS),
-                    )
-                    .on_hover_text("데이터 검색 (Ctrl+F)")
-                    .clicked()
-                {
-                    self.show_search_bar = if search_active { false } else { true };
-                    self.search_replace_mode = false;
-                }
-
-                let replace_active = self.show_search_bar && self.search_replace_mode;
-                if ui
-                    .selectable_label(
-                        replace_active,
-                        format!("{} 바꾸기", egui_phosphor::regular::ARROWS_CLOCKWISE),
-                    )
-                    .on_hover_text("데이터 찾기 및 바꾸기 (Ctrl+H)")
-                    .clicked()
-                {
-                    self.show_search_bar = if replace_active { false } else { true };
-                    self.search_replace_mode = true;
-                }
-
+                // SQL Query (Access style)
                 let query_active = self.query_window.is_open;
-                if ui
-                    .selectable_label(
-                        query_active,
-                        format!("{} SQL 쿼리", egui_phosphor::regular::LIGHTNING),
-                    )
-                    .on_hover_text("별도의 Access 스타일 SQL 쿼리 조회 창 열기 (F2)")
-                    .clicked()
+                let query_color = if query_active {
+                    Some(Color32::from_rgb(2, 132, 199))
+                } else {
+                    None
+                };
+                if ribbon_button(
+                    ui,
+                    egui_phosphor::regular::TERMINAL_WINDOW,
+                    "SQL 쿼리",
+                    "별도 Access 스타일 SQL 쿼리 조회 창 열기 (F2)",
+                    query_color,
+                    None,
+                )
+                .clicked()
                 {
                     self.query_window.is_open = !query_active;
                 }
 
                 ui.separator();
 
-                // Group 6: Help
-                if ui
-                    .button(format!("{} 도움말", egui_phosphor::regular::QUESTION))
-                    .on_hover_text("단축키 및 기능 전체 안내 (F1)")
-                    .clicked()
+                // Schema Copy for AI Agent
+                if ribbon_button(
+                    ui,
+                    egui_phosphor::regular::FILE_CODE,
+                    "스키마 복사",
+                    "현재 테이블의 컬럼명, 타입, 기본키 정보를 AI 프롬프트용 마크다운으로 클립보드 복사",
+                    Some(Color32::from_rgb(37, 99, 235)),
+                    None,
+                )
+                .clicked()
                 {
-                    self.show_help_modal = true;
+                    self.copy_table_schema_to_clipboard();
                 }
-            });
 
-            ui.add_space(4.0);
+                // Right Utility Icon Buttons
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(egui_phosphor::regular::QUESTION).size(16.0),
+                            )
+                            .min_size(egui::vec2(32.0, 32.0)),
+                        )
+                        .on_hover_text("단축키 및 도움말 (F1)")
+                        .clicked()
+                    {
+                        self.show_help_modal = true;
+                    }
 
-            // Clean single-line info strip under toolbar
-            ui.horizontal(|ui| {
-                if let Some(fname) = self.db_service.file_name() {
-                    ui.label(RichText::new(format!("DB: {fname}")).strong());
-                    ui.separator();
-                }
-                if let Some(tname) = &self.selected_table {
-                    ui.label(RichText::new(format!("테이블: {tname}")).strong().color(Color32::from_rgb(0, 102, 204)));
-                    ui.separator();
-                }
-                ui.label(RichText::new(&self.status_message).small().color(Color32::DARK_GRAY));
+                    let search_active = self.show_search_bar;
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS)
+                                    .size(16.0)
+                                    .color(if search_active {
+                                        Color32::from_rgb(2, 132, 199)
+                                    } else {
+                                        ui.visuals().text_color()
+                                    }),
+                            )
+                            .min_size(egui::vec2(32.0, 32.0)),
+                        )
+                        .on_hover_text("데이터 검색 바 열기 / 닫기 (Ctrl+F)")
+                        .clicked()
+                    {
+                        self.show_search_bar = !search_active;
+                    }
+                });
             });
-            ui.add_space(3.0);
+            ui.add_space(2.0);
         });
 
         // Search & Replace Docked Panel (Appears when Ctrl+F or Ctrl+H is active)
@@ -959,7 +1173,7 @@ impl eframe::App for SqliteEditorApp {
                         let mut clicked_table = None;
                         for table in &self.table_summaries {
                             let is_selected = current_selected.as_deref() == Some(&table.name);
-                            let text = format!("{} {} ({})", egui_phosphor::regular::TABLE, table.name, table.row_count);
+                            let text = format!("{} {}", egui_phosphor::regular::TABLE, table.name);
 
                             let resp = ui.selectable_label(is_selected, text);
                             if resp.clicked() && !is_selected {
@@ -973,47 +1187,27 @@ impl eframe::App for SqliteEditorApp {
                 }
             });
 
-        // Bottom Compact Status Bar (Clean 28px bar)
+        // Bottom Compact Status Bar (Clean 24px bar)
         Panel::bottom("bottom_info_panel")
             .resizable(false)
-            .default_size(28.0)
+            .default_size(24.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let dirty_count = self.table.tracker.dirty_cells_count();
-                    let new_rows_count = self.table.tracker.new_rows.len();
-                    let deleted_rows_count = self.table.tracker.deleted_rows.len();
-                    let total_rows = self.table.row_count();
+                    ui.label(RichText::new(&self.status_message).small().color(Color32::DARK_GRAY));
 
-                    if dirty_count == 0 && new_rows_count == 0 && deleted_rows_count == 0 {
-                        ui.colored_label(
-                            Color32::from_rgb(46, 125, 50),
-                            format!("{} 저장됨 (변경 없음)", egui_phosphor::regular::CHECK_CIRCLE),
-                        );
-                    } else {
-                        ui.colored_label(
-                            Color32::from_rgb(230, 81, 0),
-                            format!(
-                                "{} 미저장: 수정 {} / 추가 {} / 삭제 {}",
-                                egui_phosphor::regular::WARNING_CIRCLE,
-                                dirty_count,
-                                new_rows_count,
-                                deleted_rows_count
-                            ),
-                        );
-                    }
-
-                    ui.separator();
-                    ui.label(format!("행: {} | 열: {}", total_rows, self.table.column_names.len()));
-
-                    if let Some(schema) = &self.table.schema {
-                        if !schema.primary_keys.is_empty() {
-                            ui.separator();
-                            ui.label(format!("기본키(PK): {}", schema.primary_keys.join(", ")));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.is_locked {
+                            ui.colored_label(
+                                Color32::from_rgb(217, 119, 6),
+                                format!("{} 잠금 (읽기 전용)", egui_phosphor::regular::LOCK_SIMPLE),
+                            );
+                        } else {
+                            ui.colored_label(
+                                Color32::from_rgb(46, 125, 50),
+                                format!("{} 편집 모드", egui_phosphor::regular::LOCK_SIMPLE_OPEN),
+                            );
                         }
-                    }
-
-                    ui.separator();
-                    ui.label(RichText::new("단축키 / 도움말: F1").weak());
+                    });
                 });
             });
 
@@ -1072,8 +1266,12 @@ impl eframe::App for SqliteEditorApp {
                             ui.label("테이블 끝에 새 빈 행 추가");
                             ui.end_row();
 
-                            ui.strong("Ctrl + D / Delete");
-                            ui.label("지정한 행 삭제 예정(취소선) 표시 또는 복원");
+                            ui.strong("Delete");
+                            ui.label("선택한 셀 내용 일괄 비우기 (전체 열 선택 시 행 삭제 표시)");
+                            ui.end_row();
+
+                            ui.strong("Ctrl + D");
+                            ui.label("선택한 행 삭제 예정(취소선) 표시 또는 복원 토글");
                             ui.end_row();
 
                             ui.strong("Ctrl + C");
@@ -1089,11 +1287,15 @@ impl eframe::App for SqliteEditorApp {
                             ui.end_row();
 
                             ui.strong("더블클릭 / Enter");
-                            ui.label("선택한 셀 내용 직접 편집");
+                            ui.label("선택한 셀 내용 직접 편집 시작");
+                            ui.end_row();
+
+                            ui.strong("Enter / Shift + Enter");
+                            ui.label("편집 확정 후 아래 / 위 행의 셀로 이동");
                             ui.end_row();
 
                             ui.strong("Tab / Shift + Tab");
-                            ui.label("다음/이전 셀로 이동 및 편집 확정");
+                            ui.label("편집 확정 후 다음 / 이전 열의 셀로 이동");
                             ui.end_row();
 
                             ui.strong("Esc");

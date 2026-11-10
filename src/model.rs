@@ -301,6 +301,10 @@ impl TrackedTableBackend {
     }
 
     /// Revert all dirty changes back to baseline
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.inner.set_read_only(read_only);
+    }
+
     pub fn revert_all(&mut self) {
         // Revert cell values
         for (coord, change) in &self.tracker.dirty_cells {
