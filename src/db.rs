@@ -95,8 +95,9 @@ impl DbService {
         let path_buf = path.as_ref().to_path_buf();
         let conn = Connection::open(&path_buf)?;
 
-        // Enable WAL mode and foreign keys for safety and performance
-        let _ = conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+        // Enable foreign keys for referential integrity.
+        // We preserve the database's existing journal mode (e.g. WAL vs DELETE single-file mode).
+        let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
 
         self.db_path = Some(path_buf);
         self.conn = Some(conn);
@@ -320,6 +321,47 @@ impl DbService {
         let after_size = std::fs::metadata(path)?.len();
 
         Ok((before_size, after_size))
+    }
+
+    /// Query current SQLite journal mode (e.g. "WAL", "DELETE", "MEMORY")
+    pub fn get_journal_mode(&self) -> Result<String, rusqlite::Error> {
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
+        let mode: String = conn.query_row("PRAGMA journal_mode;", [], |row| row.get(0))?;
+        Ok(mode.to_uppercase())
+    }
+
+    /// Switch SQLite journal mode (e.g. "WAL" or "DELETE").
+    /// When switching to "DELETE" (Rollback Journal):
+    /// 1. Flushes WAL changes to main DB with `PRAGMA wal_checkpoint(TRUNCATE)`
+    /// 2. Switches journal mode to DELETE
+    /// 3. Cleans up dangling -wal and -shm files, leaving a clean single-file .db
+    pub fn set_journal_mode(&self, target_mode: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let conn = self.conn.as_ref().ok_or("열린 데이터베이스가 없습니다.")?;
+        let target = target_mode.trim().to_uppercase();
+
+        if target == "DELETE" {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+
+        let query = format!("PRAGMA journal_mode = {};", target);
+        let actual: String = conn.query_row(&query, [], |row| row.get(0))?;
+        let actual_upper = actual.to_uppercase();
+
+        if actual_upper == "DELETE" {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            if let Some(path) = &self.db_path {
+                let file_str = path.to_string_lossy();
+                let wal_file = std::path::PathBuf::from(format!("{file_str}-wal"));
+                let shm_file = std::path::PathBuf::from(format!("{file_str}-shm"));
+                let _ = std::fs::remove_file(wal_file);
+                let _ = std::fs::remove_file(shm_file);
+            }
+        }
+
+        Ok(actual_upper)
     }
 
     /// Atomically save in-memory modifications (updates, inserts, deletes) into SQLite.

@@ -188,3 +188,52 @@ fn test_p24_04_compact_database_vacuum() {
 
     let _ = fs::remove_file(db_path);
 }
+
+#[test]
+fn test_p24_05_journal_mode_switching_wal_and_delete() {
+    let db_path = setup_temp_db("05");
+    let mut db = DbService::new();
+    db.open(&db_path).unwrap();
+
+    // 1. Initial sample DB has WAL mode
+    let initial_mode = db.get_journal_mode().unwrap();
+    assert_eq!(initial_mode, "WAL", "샘플 DB는 초기에 WAL 모드여야 합니다.");
+
+    // Perform an insert
+    {
+        let conn = db.conn.as_ref().unwrap();
+        conn.execute("INSERT INTO customers (name, email) VALUES (?1, ?2);", ["테스트고객", "test_journal@example.com"]).unwrap();
+    }
+
+    // 2. Switch to DELETE mode (Rollback Journal, single file)
+    let set_result = db.set_journal_mode("DELETE").unwrap();
+    assert_eq!(set_result, "DELETE", "set_journal_mode(\"DELETE\") 반환값은 DELETE여야 합니다.");
+    assert_eq!(db.get_journal_mode().unwrap(), "DELETE", "현재 모드가 DELETE로 조회되어야 합니다.");
+
+    // Verify -wal and -shm files are removed / cleaned up
+    let file_str = db_path.to_string_lossy();
+    let wal_file = std::path::PathBuf::from(format!("{file_str}-wal"));
+    let shm_file = std::path::PathBuf::from(format!("{file_str}-shm"));
+    assert!(!wal_file.exists(), "DELETE 모드 전환 후 .db-wal 파일이 정리되어 존재하지 않아야 합니다.");
+    assert!(!shm_file.exists(), "DELETE 모드 전환 후 .db-shm 파일이 정리되어 존재하지 않아야 합니다.");
+
+    // 3. Verify data persists with zero data loss
+    {
+        let conn = db.conn.as_ref().unwrap();
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM customers WHERE email = 'test_journal@example.com';",
+            [],
+            |r| r.get(0)
+        ).unwrap();
+        assert!(exists, "저널 모드 전환 후에도 데이터가 유실 없이 안전하게 보존되어야 합니다.");
+    }
+
+    // 4. Switch back to WAL mode
+    let set_wal_result = db.set_journal_mode("WAL").unwrap();
+    assert_eq!(set_wal_result, "WAL", "set_journal_mode(\"WAL\") 반환값은 WAL이어야 합니다.");
+    assert_eq!(db.get_journal_mode().unwrap(), "WAL", "현재 모드가 WAL로 조회되어야 합니다.");
+
+    let _ = fs::remove_file(db_path);
+    let _ = fs::remove_file(wal_file);
+    let _ = fs::remove_file(shm_file);
+}

@@ -71,6 +71,9 @@ pub struct SqliteEditorApp {
 
     // Database Lock / Read-Only Mode
     pub is_locked: bool,
+
+    // SQLite Journal Mode ("WAL", "DELETE", etc.)
+    pub current_journal_mode: String,
 }
 
 pub fn setup_korean_fonts(ctx: &egui::Context) {
@@ -244,6 +247,7 @@ impl SqliteEditorApp {
             show_smart_paste_modal: false,
             smart_paste_text: String::new(),
             is_locked: false,
+            current_journal_mode: "DELETE".to_string(),
         };
 
         app
@@ -274,6 +278,10 @@ impl SqliteEditorApp {
     pub fn load_database(&mut self, path: PathBuf) {
         match self.db_service.open(&path) {
             Ok(()) => {
+                self.current_journal_mode = self
+                    .db_service
+                    .get_journal_mode()
+                    .unwrap_or_else(|_| "DELETE".to_string());
                 match self.db_service.list_tables() {
                     Ok(tables) => {
                         self.table_summaries = tables;
@@ -429,6 +437,43 @@ impl SqliteEditorApp {
             }
             Err(e) => {
                 self.status_message = format!("데이터베이스 압축 실패: {e}");
+            }
+        }
+    }
+
+    pub fn toggle_journal_mode(&mut self) {
+        if self.is_locked {
+            self.status_message = "잠금 상태입니다. 잠금을 해제한 후 저널 모드를 전환하세요.".to_string();
+            return;
+        }
+        if !self.db_service.is_open() {
+            self.status_message = "열린 데이터베이스가 없습니다.".to_string();
+            return;
+        }
+
+        // Commit uncommitted edits first to prevent data loss
+        if self.table.tracker.is_dirty() {
+            self.save_to_sqlite();
+        }
+
+        let target_mode = if self.current_journal_mode == "WAL" {
+            "DELETE"
+        } else {
+            "WAL"
+        };
+
+        match self.db_service.set_journal_mode(target_mode) {
+            Ok(new_mode) => {
+                self.current_journal_mode = new_mode.clone();
+                if new_mode == "DELETE" {
+                    self.status_message = "저널 모드 'DELETE' (단일 파일) 전환 완료: WAL 트랜잭션이 메인 DB에 완전 통합되었습니다.".to_string();
+                } else {
+                    self.status_message = "저널 모드 'WAL' (고성능 쓰기) 전환 완료.".to_string();
+                }
+                self.last_action_time = Some(Instant::now());
+            }
+            Err(e) => {
+                self.status_message = format!("저널 모드 전환 실패: {e}");
             }
         }
     }
@@ -1207,6 +1252,40 @@ impl eframe::App for SqliteEditorApp {
                                 format!("{} 편집 모드", egui_phosphor::regular::LOCK_SIMPLE_OPEN),
                             );
                         }
+
+                        ui.separator();
+
+                        let (j_icon, j_label, j_color) = if self.current_journal_mode == "WAL" {
+                            (
+                                egui_phosphor::regular::LIGHTNING,
+                                "저널: WAL",
+                                Color32::from_rgb(2, 132, 199),
+                            )
+                        } else {
+                            (
+                                egui_phosphor::regular::FILE_TEXT,
+                                "저널: DELETE (단일 파일)",
+                                Color32::from_rgb(107, 114, 128),
+                            )
+                        };
+
+                        let j_tooltip = if self.current_journal_mode == "WAL" {
+                            "현재 SQLite 저널 모드: WAL (Write-Ahead Log)\n- 고성능 쓰기 처리\n- 별도 .db-wal / .db-shm 파일 생성됨\n\n👉 클릭 시 단일 파일(DELETE) 모드로 전환 (공유/이동에 최적)"
+                        } else {
+                            "현재 SQLite 저널 모드: DELETE (Rollback Journal)\n- 모든 데이터가 .db 단일 파일에만 완전 보존됨\n- 파일 복사, USB/이메일 공유에 최적\n\n👉 클릭 시 고성능 WAL 모드로 전환"
+                        };
+
+                        let j_btn = ui.add(
+                            egui::Button::new(
+                                RichText::new(format!("{} {}", j_icon, j_label))
+                                    .small()
+                                    .color(j_color),
+                            )
+                            .frame(false),
+                        );
+                        if j_btn.on_hover_text(j_tooltip).clicked() {
+                            self.toggle_journal_mode();
+                        }
                     });
                 });
             });
@@ -1309,6 +1388,10 @@ impl eframe::App for SqliteEditorApp {
                             ui.strong("F1");
                             ui.label("도움말 팝업 열기 / 닫기");
                             ui.end_row();
+
+                            ui.strong("저널 모드 전환 (하단 바)");
+                            ui.label("하단 바 클릭: WAL(고성능 쓰기) ⇄ DELETE(단일 파일 완전 통합, 공유/백업 최적)");
+                            ui.end_row();
                         });
 
                     ui.add_space(12.0);
@@ -1318,6 +1401,7 @@ impl eframe::App for SqliteEditorApp {
                     ui.label("• 셀을 수정하거나 행을 추가/삭제해도 즉시 파일에 쓰이지 않습니다.");
                     ui.label("• '저장(Ctrl+S)'을 누르면 원본 DB가 자동으로 백업(*.bak)된 후 안전하게 반영됩니다.");
                     ui.label("• 저장 전 언제든 '되돌리기(Ctrl+Z)'로 모든 변경사항을 원복할 수 있습니다.");
+                    ui.label("• 하단 '저널 모드'를 클릭해 고성능 WAL 모드와 단일 파일(DELETE) 모드를 손쉽게 전환할 수 있습니다.");
 
                     ui.add_space(14.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
